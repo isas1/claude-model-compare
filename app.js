@@ -464,8 +464,9 @@ function renderChart() {
     return e;
   }
 
-  // gridlines + y-axis labels
+  // gridlines + y-axis labels (skip a tick label if rounding made it identical to the previous one)
   const yTickCount = 5;
+  let prevYLabel = null;
   for (let i = 0; i <= yTickCount; i++) {
     let val;
     if (logScale) {
@@ -477,9 +478,13 @@ function renderChart() {
     }
     const y = yScale(val);
     svg.appendChild(el('line', { x1: margin.left, x2: margin.left + innerW, y1: y, y2: y, class: 'grid-line' }));
-    const label = el('text', { x: margin.left - 8, y: y + 3, class: 'axis-label', 'text-anchor': 'end' });
-    label.textContent = fmtNum(val);
-    svg.appendChild(label);
+    const labelText = fmtNum(val);
+    if (labelText !== prevYLabel) {
+      const label = el('text', { x: margin.left - 8, y: y + 3, class: 'axis-label', 'text-anchor': 'end' });
+      label.textContent = labelText;
+      svg.appendChild(label);
+      prevYLabel = labelText;
+    }
   }
 
   // x-axis labels (dates)
@@ -505,6 +510,10 @@ function renderChart() {
   }
   yAxisTitle.textContent = yTitle;
   svg.appendChild(yAxisTitle);
+
+  const xAxisTitle = el('text', { x: margin.left + innerW / 2, y: height - 4, class: 'axis-label', 'text-anchor': 'middle' });
+  xAxisTitle.textContent = 'session start date';
+  svg.appendChild(xAxisTitle);
 
   // points — hoverable AND keyboard-focusable; native SVG <title> covers touch long-press
   points.forEach(p => {
