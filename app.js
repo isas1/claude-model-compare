@@ -129,6 +129,7 @@ function renderAll() {
   renderHeatmap();
   renderChart();
   renderToolUsage();
+  renderMessagePatterns();
 }
 
 function renderFooter() {
@@ -924,6 +925,131 @@ function renderSuggestedUse() {
         These sessions leaned ${toolPhrase} and averaged ${autonomyText} per prompt.
         Based on ${rows.length} session(s).
       </p>
+    `;
+    container.appendChild(card);
+  });
+}
+
+// ---------- v2 P1 metrics (COLLECT-tier; needs schema_version >= 2 fields) ----------
+
+function hasV2Data() {
+  return !!(DATA && DATA.schema_version >= 2);
+}
+
+// A9. stop_reason distribution: pooled counts across the cohort's rows,
+// normalized to a %-of-total map. Pooled (not per-row median) — this is a
+// distribution over lines, not a per-row ratio.
+function computeStopReasonMix(rows) {
+  const totals = {};
+  let grand = 0;
+  rows.forEach(r => {
+    const sr = r.main.stop_reasons || {};
+    Object.entries(sr).forEach(([key, count]) => {
+      totals[key] = (totals[key] || 0) + count;
+      grand += count;
+    });
+  });
+  if (grand === 0) return null;
+  const entries = Object.entries(totals)
+    .map(([key, count]) => ({ key, count, pct: (count / grand) * 100 }))
+    .sort((a, b) => b.count - a.count);
+  return { entries, grand };
+}
+
+// A10. Thinking block frequency: thinking_messages / assistant_messages per
+// row, median across cohort. Zero guard: assistant_messages == 0 excluded.
+function computeThinkingFrequency(rows) {
+  let excluded = 0;
+  const vals = [];
+  rows.forEach(r => {
+    if (!r.main.assistant_messages) { excluded++; return; }
+    if (r.main.thinking_messages === undefined) return; // v1 row, no field
+    vals.push(r.main.thinking_messages / r.main.assistant_messages);
+  });
+  return { median: median(vals), excluded };
+}
+
+// A11. text_chars_per_text_block: text_chars / text_blocks per row, median.
+// Zero guard: text_blocks == 0 excluded.
+function computeTextCharsPerBlock(rows) {
+  let excluded = 0;
+  const vals = [];
+  rows.forEach(r => {
+    if (r.main.text_blocks === undefined) return; // v1 row, no field
+    if (!r.main.text_blocks) { excluded++; return; }
+    vals.push(r.main.text_chars / r.main.text_blocks);
+  });
+  return { median: median(vals), excluded };
+}
+
+// A8. Quick-follow-up cadence: quick_follow_ups / user_turns per row,
+// median. "Cadence, not sentiment." Zero guard: user_turns == 0 excluded.
+function computeFollowUpCadence(rows) {
+  let excluded = 0;
+  const quickRateVals = [];
+  let totalShort = 0;
+  let totalQuick = 0;
+  rows.forEach(r => {
+    if (r.main.quick_follow_ups === undefined) return; // v1 row
+    if (!r.main.user_turns) { excluded++; return; }
+    quickRateVals.push(r.main.quick_follow_ups / r.main.user_turns);
+    totalQuick += r.main.quick_follow_ups;
+    totalShort += r.main.short_quick_follow_ups || 0;
+  });
+  return {
+    quickRateMedian: median(quickRateVals),
+    excluded,
+    totalQuick,
+    totalShort,
+  };
+}
+
+function renderMessagePatterns() {
+  const section = document.getElementById('messagePatternsSection');
+  const container = document.getElementById('messagePatternsCards');
+  if (!section || !container) return;
+
+  if (!hasV2Data()) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  container.innerHTML = '';
+
+  const models = allModelsSeen().filter(m => visibleModels.has(m));
+
+  models.forEach(model => {
+    const rows = DATA.rows.filter(r => r.model === model);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.setProperty('--card-color', colorForModel(model));
+
+    if (rows.length === 0) {
+      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      container.appendChild(card);
+      return;
+    }
+
+    const stopMix = computeStopReasonMix(rows);
+    const thinking = computeThinkingFrequency(rows);
+    const textChars = computeTextCharsPerBlock(rows);
+    const followUp = computeFollowUpCadence(rows);
+
+    let stopReasonHtml = '<span class="empty">—</span>';
+    if (stopMix) {
+      stopReasonHtml = stopMix.entries
+        .map(e => `<div class="bar-row"><span class="bar-label">${e.key}</span><div class="bar-track"><div class="bar-fill" style="width:${e.pct}%;--bar-color:${getComputedColor(model)}"></div></div><span class="bar-num">${e.pct.toFixed(1)}%</span></div>`)
+        .join('');
+    }
+
+    card.innerHTML = `
+      <h3>${model}</h3>
+      <div class="metric-row"><span class="k">Thinking block frequency (median)</span><span class="v">${fmtPct(thinking.median)}</span></div>
+      <div class="metric-row"><span class="k">Text chars / text block (median)</span><span class="v">${fmtNum(textChars.median)}</span></div>
+      <div class="metric-row"><span class="k">Quick follow-up rate (median, cadence not sentiment)</span><span class="v">${fmtPct(followUp.quickRateMedian)}</span></div>
+      <div class="metric-row"><span class="k">Quick follow-ups (short / total)</span><span class="v">${followUp.totalShort} / ${followUp.totalQuick}</span></div>
+      <div class="sub-heading">stop_reason distribution (pooled)</div>
+      <div class="bars">${stopReasonHtml}</div>
     `;
     container.appendChild(card);
   });

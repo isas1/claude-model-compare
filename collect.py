@@ -37,6 +37,11 @@ HAIKU_LABEL = "Haiku 4.5"
 
 DURATION_GAP_CAP_MS = 300_000  # 5 minutes (§5a)
 
+SCHEMA_VERSION = 2  # METRIC-RULES-V2.md §C
+
+QUICK_FOLLOW_UP_MS = 45_000  # A8 threshold (< 45s after prev assistant line)
+SHORT_FOLLOW_UP_CHARS = 120  # A8 threshold (flattened text length)
+
 # §4 (amended): measured fallback baseline is ~20% (dominated by queued user
 # messages, Lead-reviewed and accepted). Escalate only when fallback
 # materially exceeds that baseline (>30%).
@@ -216,6 +221,13 @@ def empty_main_block():
         "cache_creation_tokens": 0,
         "tool_calls": {},
         "tool_errors": 0,
+        # --- v2 additive fields (METRIC-RULES-V2.md §C) ---
+        "stop_reasons": {},           # A9: {stop_reason_str: count}; null/missing -> "none"
+        "thinking_messages": 0,       # A10: main assistant lines with >=1 thinking block (presence only)
+        "text_chars": 0,              # A11: sum of len(text) over text-type content blocks (integer only)
+        "text_blocks": 0,             # A11: count of text-type content blocks
+        "quick_follow_ups": 0,        # A8: user turns < 45s after preceding main assistant line
+        "short_quick_follow_ups": 0,  # A8: quick follow-ups whose flattened text len < 120
     }
 
 
@@ -357,7 +369,14 @@ def iter_nested_agent_files(project_dir):
 def _parse_assistant_line(line):
     """Validate + extract everything needed from an assistant line.
     Returns (model, usage_dict keyed by our block keys, tool_uses list of
-    (name, tid)) or raises SkipLine. Performs NO row mutation."""
+    (name, tid), stop_reason_key, has_thinking, text_chars, text_blocks) or
+    raises SkipLine. Performs NO row mutation.
+
+    stop_reason_key / has_thinking / text_chars / text_blocks are the v2
+    additive extractions (METRIC-RULES-V2.md §C, A9/A10/A11). Privacy-bound:
+    text_chars/text_blocks are integers only, never any text content or
+    substring; has_thinking is a boolean presence flag, never thinking text.
+    """
     msg = line.get("message")
     if not isinstance(msg, dict):
         raise SkipLine()
@@ -370,16 +389,38 @@ def _parse_assistant_line(line):
              for src_key, out_key in USAGE_KEYS}
 
     tool_uses = []
+    has_thinking = False
+    text_chars = 0
+    text_blocks = 0
     content = msg.get("content")
     if isinstance(content, list):
         for c in content:
-            if isinstance(c, dict) and c.get("type") == "tool_use":
+            if not isinstance(c, dict):
+                continue
+            btype = c.get("type")
+            if btype == "tool_use":
                 name = c.get("name")
                 tid = c.get("id")
                 _check_hashable(name)   # unhashable name/id -> skip line (§0)
                 _check_hashable(tid)
                 tool_uses.append((name or "unknown", tid))
-    return model, usage, tool_uses
+            elif btype == "thinking":
+                has_thinking = True
+            elif btype == "text":
+                t = c.get("text")
+                if isinstance(t, str):
+                    text_chars += len(t)
+                    text_blocks += 1
+
+    # A9: stop_reason bucketing. Non-empty string -> itself; anything else
+    # (null/missing/non-string) -> "none". The line is never dropped for this.
+    stop_reason_raw = msg.get("stop_reason")
+    if isinstance(stop_reason_raw, str) and stop_reason_raw:
+        stop_reason_key = stop_reason_raw
+    else:
+        stop_reason_key = "none"
+
+    return model, usage, tool_uses, stop_reason_key, has_thinking, text_chars, text_blocks
 
 
 def _parse_user_error_results(line):
@@ -493,7 +534,8 @@ def process_top_level_file(path, rows, counters, session_meta=None):
 
                 if ltype == "assistant":
                     # Parse (guarded, no mutation) ...
-                    model, usage, tool_uses = _parse_assistant_line(line)
+                    (model, usage, tool_uses, stop_reason_key, has_thinking,
+                     text_chars, text_blocks) = _parse_assistant_line(line)
 
                     # ... then apply (validated inputs; cannot raise).
                     counters.models_seen.add(model)
@@ -505,6 +547,13 @@ def process_top_level_file(path, rows, counters, session_meta=None):
                     block = row.subagent if is_sidechain else row.main
                     if scope == "main":
                         block["assistant_messages"] += 1
+                        # v2 additive (main lines only, METRIC-RULES-V2.md §C).
+                        block["stop_reasons"][stop_reason_key] = (
+                            block["stop_reasons"].get(stop_reason_key, 0) + 1)
+                        if has_thinking:
+                            block["thinking_messages"] += 1
+                        block["text_chars"] += text_chars
+                        block["text_blocks"] += text_blocks
                     else:
                         block["messages"] += 1
                     for out_key in BLOCK_TOKEN_KEYS:
@@ -539,7 +588,10 @@ def process_top_level_file(path, rows, counters, session_meta=None):
                         if not first_user_seen:
                             first_user_seen = True
                             first_user_text = extract_texts(line["message"].get("content"))
-                        events.append(("user_turn", line.get("uuid"), ts_ms, pos))
+                        # A8: flattened text LENGTH only (never stored as text)
+                        # for the short-follow-up sub-signal.
+                        turn_text_len = len(extract_texts(line["message"].get("content")))
+                        events.append(("user_turn", line.get("uuid"), ts_ms, pos, turn_text_len))
 
             except SkipLine:
                 counters.lines_skipped += 1
@@ -566,7 +618,7 @@ def process_top_level_file(path, rows, counters, session_meta=None):
     for idx, ev in enumerate(events):
         if ev[0] != "user_turn":
             continue
-        _, user_uuid, ts_ms, user_pos = ev
+        _, user_uuid, ts_ms, user_pos, turn_text_len = ev
         attributed_model = None
         method = None
 
@@ -625,6 +677,23 @@ def process_top_level_file(path, rows, counters, session_meta=None):
         else:
             counters.fallback += 1
 
+        # --- A8: quick-follow-up cadence (METRIC-RULES-V2.md §C) ---
+        # Nearest preceding MAIN assistant line's timestamp, by event-list
+        # order (events holds only main-chain assistant + user_turn entries;
+        # sidechain assistant lines are never appended to it). Missing or
+        # unparseable ts on either side -> skip (do not count), per spec.
+        prev_assistant_ts = None
+        for k in range(idx - 1, -1, -1):
+            if events[k][0] == "assistant":
+                prev_assistant_ts = events[k][2]
+                break
+        if ts_ms is not None and prev_assistant_ts is not None:
+            gap = ts_ms - prev_assistant_ts
+            if 0 <= gap < QUICK_FOLLOW_UP_MS:
+                target_row.main["quick_follow_ups"] += 1
+                if turn_text_len < SHORT_FOLLOW_UP_CHARS:
+                    target_row.main["short_quick_follow_ups"] += 1
+
     # Session-level metadata (§5/§5b: project and task_category are
     # session-level, not per-model). Stamping happens in collect()'s
     # reconciliation pass, AFTER nested files may have created
@@ -675,7 +744,10 @@ def process_nested_file(path, parent_session_id, rows, counters):
                 ts_ms = parse_ts(line.get("timestamp"))
 
                 if ltype == "assistant":
-                    model, usage, tool_uses = _parse_assistant_line(line)
+                    model, usage, tool_uses, _stop_reason_key, _has_thinking, \
+                        _text_chars, _text_blocks = _parse_assistant_line(line)
+                    # v2 P1 fields (stop_reasons/thinking/text) are main-only
+                    # per METRIC-RULES-V2.md §C; subagent block unchanged.
 
                     counters.models_seen.add(model)
                     row = get_or_create_row(rows, parent_session_id, model)
@@ -825,6 +897,7 @@ def build_data(rows, counters):
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "schema_version": SCHEMA_VERSION,
         "top_level_files_seen": counters.top_level_files_seen,
         "files_with_data": counters.files_with_data,
         "files_nested_scanned": counters.files_nested_scanned,

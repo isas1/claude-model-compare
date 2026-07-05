@@ -501,6 +501,43 @@ class TestFixtureFiles(unittest.TestCase):
             self.assertNotIn("/Users/", row["project"])
             self.assertFalse(row["project"].startswith("/"))
 
+    def test_v2_stop_reason_distribution(self):
+        # A9: tool_use, end_turn, and null (-> "none") bucketed correctly;
+        # the null-stop_reason line is never dropped (still counts toward
+        # assistant_messages).
+        row = self.rows[("v2_stop_reasons", "Opus 4.8")]
+        self.assertEqual(row["main"]["assistant_messages"], 3)
+        self.assertEqual(row["main"]["stop_reasons"], {"tool_use": 1, "end_turn": 1, "none": 1})
+
+    def test_v2_thinking_message_frequency_presence_only(self):
+        # A10: thinking_messages counts LINES with >=1 thinking block, once
+        # per line (a1 has one thinking block); a2 has none.
+        row = self.rows[("v2_thinking_text", "Fable 5")]
+        self.assertEqual(row["main"]["assistant_messages"], 2)
+        self.assertEqual(row["main"]["thinking_messages"], 1)
+
+    def test_v2_text_chars_and_blocks(self):
+        # A11: sum of len(text) over text-type blocks + block count.
+        # a1: "12345" (5) + "1234567890" (10) = 15 chars, 2 blocks.
+        # a2: "no thinking here" (16 chars), 1 block.
+        row = self.rows[("v2_thinking_text", "Fable 5")]
+        self.assertEqual(row["main"]["text_chars"], 15 + 16)
+        self.assertEqual(row["main"]["text_blocks"], 3)
+
+    def test_v2_quick_follow_up_cadence(self):
+        # A8: u2 (10s after a1) is quick + short (18 chars < 120).
+        # u3 (10s after a2) is quick but NOT short (>120 chars).
+        # u1 has no preceding assistant line -> not a follow-up at all.
+        row = self.rows[("v2_quick_followup", "Sonnet 5")]
+        self.assertEqual(row["main"]["user_turns"], 3)
+        self.assertEqual(row["main"]["quick_follow_ups"], 2)
+        self.assertEqual(row["main"]["short_quick_follow_ups"], 1)
+
+    def test_v2_schema_version_present(self):
+        rows, counters = collect.collect(FIXTURES_ROOT)
+        data = collect.build_data(rows, counters)
+        self.assertEqual(data["schema_version"], 2)
+
     def test_turn_attribution_counters_consistent(self):
         # chain + fallback + dropped should be >= the qualifying user turns
         # observed in multi_model_session (2 chain + 1 fallback there).
@@ -518,7 +555,7 @@ class TestBuildDataSchema(unittest.TestCase):
 
     def test_top_level_schema_keys(self):
         expected_keys = {
-            "generated_at", "top_level_files_seen", "files_with_data",
+            "generated_at", "schema_version", "top_level_files_seen", "files_with_data",
             "files_nested_scanned", "files_nested_orphaned", "lines_skipped",
             "turn_attribution", "models_seen", "rows",
         }
@@ -541,7 +578,9 @@ class TestBuildDataSchema(unittest.TestCase):
         self.assertEqual(
             set(row["main"].keys()),
             {"assistant_messages", "user_turns", "output_tokens", "input_tokens",
-             "cache_read_tokens", "cache_creation_tokens", "tool_calls", "tool_errors"},
+             "cache_read_tokens", "cache_creation_tokens", "tool_calls", "tool_errors",
+             "stop_reasons", "thinking_messages", "text_chars", "text_blocks",
+             "quick_follow_ups", "short_quick_follow_ups"},
         )
         self.assertEqual(
             set(row["subagent"].keys()),
@@ -556,6 +595,10 @@ class TestBuildDataSchema(unittest.TestCase):
                 for key, val in block.items():
                     if key == "tool_calls":
                         self.assertIsInstance(val, dict)
+                    elif key == "stop_reasons":
+                        self.assertIsInstance(val, dict)
+                        for v in val.values():
+                            self.assertIsInstance(v, int)
                     else:
                         self.assertIsInstance(val, int)
 
