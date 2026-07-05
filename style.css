@@ -172,6 +172,7 @@ code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-siz
   font-family: inherit;
 }
 .control input[type="date"] { color-scheme: dark; }
+.filter-scope { flex-basis: 100%; font-size: 0.78rem; color: var(--muted); margin: 0; }
 
 .caveat {
   font-size: 0.8rem;
