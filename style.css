@@ -183,13 +183,29 @@ code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-siz
   border: 1px solid var(--border);
 }
 
-/* Table */
+/* Table — header and metric column stay pinned while scrolling a long/wide table */
 .table-scroll {
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 75vh;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel);
 }
+.table-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 3;
+}
+.table-scroll td.metric-name,
+.table-scroll th:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 2;
+}
+.table-scroll thead th:first-child { z-index: 4; }
+.table-scroll tr.section-label td { position: sticky; left: 0; }
 /* Numbers everywhere align on a fixed digit grid — this is a stats page */
 td, .metric-row .v, .bar-num, .median, .mean, .heatmap-cell, .axis-label, .tool-mix-seg, .tool-mix-legend {
   font-variant-numeric: tabular-nums;
