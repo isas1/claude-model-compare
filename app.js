@@ -178,7 +178,7 @@ function renderOverview() {
     card.style.setProperty('--card-color', colorForModel(model));
 
     if (rows.length === 0) {
-      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions in range</div>`;
+      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
       container.appendChild(card);
       return;
     }
@@ -254,10 +254,14 @@ const TABLE_METRICS = [
   { key: 'main.cache_creation_tokens', label: 'Cache creation tokens', section: 'main', get: r => r.main.cache_creation_tokens },
   { key: 'duration_active_ms', label: 'Active duration', section: 'main', get: r => r.duration_active_ms, fmt: fmtDuration },
   { key: 'main.tool_calls_total', label: 'Tool calls (total)', section: 'main', get: r => sumToolCalls(r.main.tool_calls) },
-  { key: 'main.tool_error_rate', label: 'Tool error rate (errors/calls)', section: 'main', get: r => {
-      const calls = sumToolCalls(r.main.tool_calls);
-      return calls > 0 ? r.main.tool_errors / calls : null;
-    }, fmt: fmtPct, isRate: true },
+  { key: 'main.tool_error_rate', label: 'Tool error rate (pooled)', section: 'main',
+    // Pooled per cohort: sum of errors / sum of calls across the cohort's sessions.
+    // NOT a median/mean of per-session ratios (those over-weight low-call sessions).
+    pooled: rows => {
+      const totalCalls = rows.reduce((a, r) => a + sumToolCalls(r.main.tool_calls), 0);
+      const totalErrors = rows.reduce((a, r) => a + r.main.tool_errors, 0);
+      return totalCalls > 0 ? totalErrors / totalCalls : null;
+    }, fmt: fmtPct },
   { key: 'subagent.messages', label: 'Subagent messages', section: 'subagent', get: r => r.subagent.messages },
   { key: 'subagent.output_tokens', label: 'Subagent output tokens', section: 'subagent', get: r => r.subagent.output_tokens },
 ];
@@ -311,12 +315,21 @@ function renderTableSection() {
         cells += `<td class="empty-col">no sessions in range</td>`;
         return;
       }
+      const fmtFn = metric.fmt || fmtNum;
+      if (metric.pooled) {
+        const rate = metric.pooled(rows);
+        if (rate === null || Number.isNaN(rate)) {
+          cells += `<td class="empty-col">n/a</td>`;
+        } else {
+          cells += `<td class="metric-value"><span class="median">${fmtFn(rate)}</span><span class="mean">Σerrors / Σcalls</span></td>`;
+        }
+        return;
+      }
       const vals = rows.map(metric.get).filter(v => v !== null && v !== undefined && !Number.isNaN(v));
       if (vals.length === 0) {
         cells += `<td class="empty-col">n/a</td>`;
         return;
       }
-      const fmtFn = metric.fmt || fmtNum;
       const med = median(vals);
       const avg = mean(vals);
       cells += `<td class="metric-value"><span class="median">${fmtFn(med)}</span><span class="mean">mean ${fmtFn(avg)}</span></td>`;
@@ -340,10 +353,11 @@ function renderChart() {
       const ts = parseTs(r.start_ts);
       const val = r.main.output_tokens;
       if (ts === null) return;
-      if (logScale && val <= 0) return; // log scale can't plot zero/negative
       points.push({ model, ts, val, session_id: r.session_id, project: r.project });
     });
   });
+  // Log can't plot 0 — such points are clamped to the y-floor (noted in the axis label).
+  const zeroClamped = logScale ? points.filter(p => p.val <= 0).length : 0;
 
   const width = Math.max(900, document.querySelector('.chart-wrap').clientWidth - 32);
   const height = 380;
@@ -362,13 +376,17 @@ function renderChart() {
     text.setAttribute('y', height / 2);
     text.setAttribute('text-anchor', 'middle');
     text.setAttribute('class', 'axis-label');
-    text.textContent = 'no sessions in range';
+    text.textContent = 'no sessions';
     svg.appendChild(text);
     return;
   }
 
   const tsExtent = [Math.min(...points.map(p => p.ts)), Math.max(...points.map(p => p.ts))];
-  const valExtent = [Math.min(...points.map(p => p.val)), Math.max(...points.map(p => p.val))];
+  const valMax = Math.max(...points.map(p => p.val));
+  // Linear scale is anchored at 0 so point height is proportional to token count.
+  // Log scale floor: smallest positive value (zeros are clamped onto this floor).
+  const positiveVals = points.map(p => p.val).filter(v => v > 0);
+  const logFloor = positiveVals.length ? Math.min(...positiveVals) : 1;
 
   const xScale = ts => {
     if (tsExtent[1] === tsExtent[0]) return margin.left + innerW / 2;
@@ -377,13 +395,14 @@ function renderChart() {
 
   const yScale = val => {
     if (logScale) {
-      const lo = Math.log10(Math.max(valExtent[0], 1));
-      const hi = Math.log10(Math.max(valExtent[1], 1));
+      const lo = Math.log10(Math.max(logFloor, 1));
+      const hi = Math.log10(Math.max(valMax, 1));
       if (hi === lo) return margin.top + innerH / 2;
-      return margin.top + innerH - ((Math.log10(Math.max(val, 1)) - lo) / (hi - lo)) * innerH;
+      const clamped = Math.max(val, logFloor); // zero/negative → floor
+      return margin.top + innerH - ((Math.log10(Math.max(clamped, 1)) - lo) / (hi - lo)) * innerH;
     }
-    if (valExtent[1] === valExtent[0]) return margin.top + innerH / 2;
-    return margin.top + innerH - ((val - valExtent[0]) / (valExtent[1] - valExtent[0])) * innerH;
+    if (valMax === 0) return margin.top + innerH / 2;
+    return margin.top + innerH - (val / valMax) * innerH;
   };
 
   const ns = 'http://www.w3.org/2000/svg';
@@ -398,11 +417,11 @@ function renderChart() {
   for (let i = 0; i <= yTickCount; i++) {
     let val;
     if (logScale) {
-      const lo = Math.log10(Math.max(valExtent[0], 1));
-      const hi = Math.log10(Math.max(valExtent[1], 1));
+      const lo = Math.log10(Math.max(logFloor, 1));
+      const hi = Math.log10(Math.max(valMax, 1));
       val = Math.pow(10, lo + (hi - lo) * (i / yTickCount));
     } else {
-      val = valExtent[0] + (valExtent[1] - valExtent[0]) * (i / yTickCount);
+      val = valMax * (i / yTickCount); // linear anchored at 0
     }
     const y = yScale(val);
     svg.appendChild(el('line', { x1: margin.left, x2: margin.left + innerW, y1: y, y2: y, class: 'grid-line' }));
@@ -428,7 +447,11 @@ function renderChart() {
   svg.appendChild(el('line', { x1: margin.left, x2: margin.left + innerW, y1: margin.top + innerH, y2: margin.top + innerH, class: 'axis-line' }));
 
   const yAxisTitle = el('text', { x: 14, y: margin.top + innerH / 2, class: 'axis-label', transform: `rotate(-90 14 ${margin.top + innerH / 2})`, 'text-anchor': 'middle' });
-  yAxisTitle.textContent = 'main output tokens' + (logScale ? ' (log)' : '');
+  let yTitle = 'main output tokens';
+  if (logScale) {
+    yTitle += zeroClamped > 0 ? ` (log; ${zeroClamped} zero-token sessions at floor)` : ' (log)';
+  }
+  yAxisTitle.textContent = yTitle;
   svg.appendChild(yAxisTitle);
 
   // points
@@ -495,7 +518,7 @@ function renderToolUsage() {
     panel.style.setProperty('--panel-color', colorForModel(model));
 
     if (rows.length === 0) {
-      panel.innerHTML = `<h3>${model}</h3><div class="empty">no sessions in range</div>`;
+      panel.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
       container.appendChild(panel);
       return;
     }

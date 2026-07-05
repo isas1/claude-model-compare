@@ -23,7 +23,7 @@
 
   <section id="overviewSection">
     <h2>Overview</h2>
-    <p class="hint">Session count, median output tokens, median active duration, median user turns per model. Toggle chips to add models beyond the three defaults.</p>
+    <p class="hint">Session count, median output tokens, median active duration, median user turns per model. Toggle chips to add models beyond the three defaults. All sessions — the filter bar below applies to the comparison table only.</p>
     <div id="modelChips" class="chip-row"></div>
     <div id="overviewCards" class="cards"></div>
   </section>
@@ -67,7 +67,7 @@
 
   <section id="chartSection">
     <h2>Output tokens over time</h2>
-    <p class="hint">Each point is one (session, model) row. Hover for session id, project, and output tokens. Output tokens only — cache tokens are never included here.</p>
+    <p class="hint">Each point is one (session, model) row. Hover for session id, project, and output tokens. Output tokens only — cache tokens are never included here. All sessions — filters apply to the comparison table only.</p>
     <div class="chart-controls">
       <label><input type="checkbox" id="logScaleToggle"> Log scale (y-axis)</label>
     </div>
@@ -78,7 +78,7 @@
 
   <section id="toolSection">
     <h2>Tool usage</h2>
-    <p class="hint">Top 10 tool names per model, from main-chain tool calls (subagent tool calls not included here). Remaining tools bucketed into "other".</p>
+    <p class="hint">Top 10 tool names per model, from main-chain tool calls (subagent tool calls not included here). Remaining tools bucketed into "other". All sessions — filters apply to the comparison table only.</p>
     <div id="toolGrid" class="tool-grid"></div>
   </section>
 
