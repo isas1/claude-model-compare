@@ -131,7 +131,17 @@ code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-siz
   border-radius: 12px;
   padding: 18px 20px;
 }
-.card h3 { font-size: 1.02rem; margin-bottom: 12px; }
+/* One heading treatment for every per-model panel, regardless of section */
+.card h3, .tool-panel h3, .tool-mix-row h3 { font-size: 1rem; margin-bottom: 12px; }
+
+/* In-card subheads (e.g. stop_reason distribution) */
+.sub-heading {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 12px 0 6px;
+}
 .card .metric-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.85rem; border-bottom: 1px solid var(--panel2); }
 .card .metric-row:last-child { border-bottom: none; }
 .card .metric-row .k { color: var(--muted); }
@@ -237,7 +247,6 @@ svg.chart { display: block; }
   border-radius: 12px;
   padding: 16px 18px;
 }
-.tool-panel h3 { font-size: 0.95rem; margin-bottom: 10px; }
 .bars { display: flex; flex-direction: column; gap: 7px; }
 .bar-row { display: grid; grid-template-columns: 90px 1fr 36px; gap: 8px; align-items: center; font-size: 0.78rem; }
 .bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
@@ -254,7 +263,6 @@ svg.chart { display: block; }
 /* Tool-mix fingerprint */
 .tool-mix { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
 .tool-mix-row { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; }
-.tool-mix-row h4 { font-size: 0.9rem; margin-bottom: 8px; }
 .tool-mix-stack { display: flex; height: 22px; border-radius: 5px; overflow: hidden; background: var(--panel2); }
 .tool-mix-seg { display: flex; align-items: center; justify-content: center; font-size: 0.68rem; color: #0d1117; white-space: nowrap; overflow: hidden; }
 .tool-mix-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 0.75rem; color: var(--muted); }

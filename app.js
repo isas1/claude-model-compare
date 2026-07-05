@@ -832,7 +832,7 @@ function renderToolMix() {
     row.className = 'tool-mix-row';
 
     const mix = computeToolMix(rows);
-    const heading = document.createElement('h4');
+    const heading = document.createElement('h3');
     heading.textContent = model;
     row.appendChild(heading);
 
