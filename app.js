@@ -370,7 +370,7 @@ function renderTableSection() {
       if (metric.pooled) {
         const rate = metric.pooled(rows);
         if (rate === null || Number.isNaN(rate)) {
-          cells += `<td class="empty-col">n/a</td>`;
+          cells += `<td class="empty-col">—</td>`;
         } else {
           const caption = metric.pooledCaption || 'Σerrors / Σcalls';
           cells += `<td class="metric-value"><span class="median">${fmtFn(rate)}</span><span class="mean">${caption}</span></td>`;
@@ -379,7 +379,7 @@ function renderTableSection() {
       }
       const vals = rows.map(metric.get).filter(v => v !== null && v !== undefined && !Number.isNaN(v));
       if (vals.length === 0) {
-        cells += `<td class="empty-col">n/a</td>`;
+        cells += `<td class="empty-col">—</td>`;
         return;
       }
       const med = median(vals);
@@ -877,7 +877,8 @@ function renderToolMix() {
         seg.style.width = pct + '%';
         seg.style.background = `var(${TOOL_CLASS_COLOR_VAR[cls]})`;
         seg.title = `${TOOL_CLASS_LABEL[cls]}: ${pct.toFixed(1)}%`;
-        seg.textContent = pct >= 8 ? pct.toFixed(0) + '%' : '';
+        // Percentages live in the legend; in-bar text would print them twice.
+        seg.textContent = pct >= 12 ? TOOL_CLASS_LABEL[cls] : '';
         track.appendChild(seg);
       });
     }
