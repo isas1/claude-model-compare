@@ -80,6 +80,20 @@ main { max-width: 1200px; margin: 0 auto; padding: 0 32px 64px; }
   white-space: nowrap;
 }
 #siteNav a:hover { color: var(--text); background: var(--panel2); }
+.nav-spacer { flex: 1; }
+.nav-btn {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.78rem;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s;
+}
+.nav-btn:hover { border-color: var(--accent2); }
 
 section { margin-top: 44px; scroll-margin-top: 52px; }
 h2 { font-size: 1.2rem; margin-bottom: 4px; }

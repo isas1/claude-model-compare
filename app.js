@@ -130,6 +130,7 @@ function init() {
     renderHeatmap();
   });
 
+  initDownloadButtons();
   renderFooter();
 }
 
@@ -1126,6 +1127,94 @@ function renderMessagePatterns() {
       <div class="bars">${stopReasonHtml}</div>
     `;
     container.appendChild(card);
+  });
+}
+
+// ---------- download stats (client-side only; summary numbers, never transcript content) ----------
+
+function buildStatsExport() {
+  const models = allModelsSeen().filter(m => visibleModels.has(m));
+  const out = {
+    generated_at: DATA.generated_at,
+    exported_from: 'model-compare Usage dashboard',
+    note: 'Descriptive usage stats from local Claude Code transcripts. Differences reflect routing, task mix, and personal habits — not model capability. All values are per-model aggregates; no conversation text is included.',
+    schema_version: DATA.schema_version || 1,
+    models: {},
+  };
+  models.forEach(model => {
+    const rows = DATA.rows.filter(r => r.model === model);
+    const m = { sessions: rows.length, metrics: {} };
+    TABLE_METRICS.forEach(metric => {
+      if (rows.length === 0) return;
+      if (metric.pooled) {
+        const rate = metric.pooled(rows);
+        if (rate !== null && !Number.isNaN(rate)) m.metrics[metric.key] = { pooled: rate };
+        return;
+      }
+      const vals = rows.map(metric.get).filter(v => v !== null && v !== undefined && !Number.isNaN(v));
+      if (!vals.length) return;
+      m.metrics[metric.key] = { median: median(vals), mean: mean(vals), n: vals.length };
+    });
+    const mix = computeToolMix(rows);
+    if (mix) m.tool_mix_pct = mix.pct;
+    if (hasV2Data()) {
+      const thinking = computeThinkingFrequency(rows);
+      const textChars = computeTextCharsPerBlock(rows);
+      const stopMix = computeStopReasonMix(rows);
+      m.message_patterns = {
+        thinking_block_frequency_median: thinking.median,
+        text_chars_per_text_block_median: textChars.median,
+        stop_reason_pct: stopMix ? Object.fromEntries(stopMix.entries.map(e => [e.key, e.pct])) : null,
+      };
+    }
+    out.models[model] = m;
+  });
+  return out;
+}
+
+function downloadBlob(content, filename, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function statsToCsv(stats) {
+  const lines = ['model,metric,median,mean,pooled,n'];
+  const esc = v => (v === null || v === undefined || Number.isNaN(v)) ? '' : String(v);
+  const quote = s => /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  Object.entries(stats.models).forEach(([model, m]) => {
+    lines.push([quote(model), 'sessions', '', '', '', m.sessions].join(','));
+    Object.entries(m.metrics).forEach(([key, v]) => {
+      lines.push([quote(model), quote(key), esc(v.median), esc(v.mean), esc(v.pooled), esc(v.n)].join(','));
+    });
+    Object.entries(m.tool_mix_pct || {}).forEach(([cls, pct]) => {
+      lines.push([quote(model), quote(`tool_mix_pct.${cls}`), '', '', esc(pct), ''].join(','));
+    });
+    const mp = m.message_patterns;
+    if (mp) {
+      lines.push([quote(model), 'thinking_block_frequency', esc(mp.thinking_block_frequency_median), '', '', ''].join(','));
+      lines.push([quote(model), 'text_chars_per_text_block', esc(mp.text_chars_per_text_block_median), '', '', ''].join(','));
+      Object.entries(mp.stop_reason_pct || {}).forEach(([key, pct]) => {
+        lines.push([quote(model), quote(`stop_reason_pct.${key}`), '', '', esc(pct), ''].join(','));
+      });
+    }
+  });
+  return lines.join('\n') + '\n';
+}
+
+function initDownloadButtons() {
+  const stamp = () => (DATA.generated_at || 'export').replace(/[^0-9A-Za-z_-]/g, '-').slice(0, 24);
+  document.getElementById('downloadJsonBtn').addEventListener('click', () => {
+    downloadBlob(JSON.stringify(buildStatsExport(), null, 2), `model-compare-stats-${stamp()}.json`, 'application/json');
+  });
+  document.getElementById('downloadCsvBtn').addEventListener('click', () => {
+    downloadBlob(statsToCsv(buildStatsExport()), `model-compare-stats-${stamp()}.csv`, 'text/csv');
   });
 }
 
