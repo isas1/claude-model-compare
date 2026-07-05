@@ -68,11 +68,21 @@ code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-siz
   border-radius: 999px;
   padding: 6px 14px;
   font-size: 0.82rem;
+  font-family: inherit;
+  line-height: inherit;
   background: var(--panel2);
   color: var(--muted);
   cursor: pointer;
   user-select: none;
   transition: border-color 0.15s, color 0.15s;
+}
+.chip:hover { border-color: var(--muted); color: var(--text); }
+
+/* Keyboard focus — visible on every interactive element, never removed */
+:focus-visible {
+  outline: 2px solid var(--accent2);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 .chip.active {
   color: var(--text);
@@ -164,7 +174,8 @@ td.empty-col { color: var(--muted); font-style: italic; }
   overflow-x: auto;
 }
 .chart-controls { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; font-size: 0.82rem; color: var(--muted); }
-.chart-controls label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.chart-controls label { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 0; }
+.chart-controls input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent2); cursor: pointer; }
 svg.chart { display: block; }
 .axis-label { fill: var(--muted); font-size: 10px; }
 .axis-line { stroke: var(--border); stroke-width: 1; }

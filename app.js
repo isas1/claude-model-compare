@@ -168,10 +168,13 @@ function buildModelChips() {
   container.innerHTML = '';
   const models = allModelsSeen();
   models.forEach(model => {
-    const chip = document.createElement('div');
+    const chip = document.createElement('button');
+    chip.type = 'button';
     chip.className = 'chip' + (visibleModels.has(model) ? ' active' : '');
+    chip.setAttribute('aria-pressed', visibleModels.has(model) ? 'true' : 'false');
     chip.style.setProperty('--chip-color', colorForModel(model));
     chip.innerHTML = `<span class="dot"></span>${escapeHtml(model)}`;
+    chip.dataset.model = model;
     chip.addEventListener('click', () => {
       if (visibleModels.has(model)) {
         visibleModels.delete(model);
@@ -180,6 +183,9 @@ function buildModelChips() {
       }
       buildModelChips();
       renderAll();
+      // Rebuild replaces the DOM node — restore keyboard focus to the same chip.
+      const rebuilt = container.querySelector(`[data-model="${CSS.escape(model)}"]`);
+      if (rebuilt) rebuilt.focus();
     });
     container.appendChild(chip);
   });
