@@ -112,13 +112,21 @@ function init() {
   document.getElementById('dateTo').addEventListener('change', renderTableSection);
   document.getElementById('categorySelect').addEventListener('change', renderTableSection);
   document.getElementById('logScaleToggle').addEventListener('change', renderChart);
+  document.getElementById('heatmapNormToggle').addEventListener('change', (e) => {
+    heatmapNormalization = e.target.checked ? 'col' : 'row';
+    renderHeatmap();
+  });
 
   renderFooter();
 }
 
 function renderAll() {
+  renderSuggestedUse();
   renderOverview();
+  renderShapeCards();
+  renderToolMix();
   renderTableSection();
+  renderHeatmap();
   renderChart();
   renderToolUsage();
 }
@@ -264,6 +272,18 @@ const TABLE_METRICS = [
     }, fmt: fmtPct },
   { key: 'subagent.messages', label: 'Subagent messages', section: 'subagent', get: r => r.subagent.messages },
   { key: 'subagent.output_tokens', label: 'Subagent output tokens', section: 'subagent', get: r => r.subagent.output_tokens },
+  { key: 'shape.msgs_per_turn', label: 'Assistant msgs / user turn', section: 'shape',
+    get: r => r.main.user_turns ? r.main.assistant_messages / r.main.user_turns : NaN },
+  { key: 'shape.tools_per_turn', label: 'Tool calls / user turn', section: 'shape',
+    get: r => r.main.user_turns ? sumToolCalls(r.main.tool_calls) / r.main.user_turns : NaN },
+  { key: 'shape.verbosity', label: 'Output tokens / assistant msg', section: 'shape',
+    get: r => r.main.assistant_messages ? r.main.output_tokens / r.main.assistant_messages : NaN },
+  { key: 'shape.subagent_output_share', label: 'Subagent output token share', section: 'shape',
+    get: r => (r.main.output_tokens + r.subagent.output_tokens) ? r.subagent.output_tokens / (r.main.output_tokens + r.subagent.output_tokens) : NaN,
+    fmt: fmtPct },
+  { key: 'shape.cache_reuse', label: 'Cache reuse (context served from cache)', section: 'shape',
+    get: r => (r.main.cache_read_tokens + r.main.input_tokens) ? r.main.cache_read_tokens / (r.main.cache_read_tokens + r.main.input_tokens) : NaN,
+    fmt: fmtPct },
 ];
 
 function sumToolCalls(toolCallsMap) {
@@ -302,7 +322,11 @@ function renderTableSection() {
       currentSection = metric.section;
       const labelRow = document.createElement('tr');
       labelRow.className = 'section-label';
-      const label = currentSection === 'main' ? 'Main (assistant + attributed user turns)' : 'Subagent (aggregated separately — never summed into main)';
+      let label;
+      if (currentSection === 'main') label = 'Main (assistant + attributed user turns)';
+      else if (currentSection === 'subagent') label = 'Subagent (aggregated separately — never summed into main)';
+      else if (currentSection === 'shape') label = 'Shape (per-row ratios, median)';
+      else label = currentSection;
       labelRow.innerHTML = `<td colspan="${models.length + 1}">${label}</td>`;
       body.appendChild(labelRow);
     }
@@ -559,6 +583,349 @@ function renderToolUsage() {
 
     panel.innerHTML = `<h3>${model}</h3><div class="bars">${barsHtml}</div>`;
     container.appendChild(panel);
+  });
+}
+
+// ---------- v2 P0 metrics (render-only, pure functions of existing data.json fields) ----------
+
+// A2. Tool mix classification. First match wins: named tools checked before mcp__* wildcards.
+const TOOL_CLASS_RULES = [
+  ['Read', 'explore'], ['Grep', 'explore'], ['Glob', 'explore'], ['LS', 'explore'],
+  ['NotebookRead', 'explore'], ['ToolSearch', 'explore'], ['WebFetch', 'explore'], ['WebSearch', 'explore'],
+  ['Edit', 'edit'], ['Write', 'edit'], ['MultiEdit', 'edit'], ['NotebookEdit', 'edit'], ['Artifact', 'edit'],
+  ['Bash', 'execute'], ['BashOutput', 'execute'], ['KillBash', 'execute'], ['KillShell', 'execute'],
+  ['Task', 'orchestrate'], ['Agent', 'orchestrate'], ['SendMessage', 'orchestrate'],
+];
+const TOOL_CLASS_WILDCARDS = [
+  [/mcp__.*read.*/i, 'explore'], [/mcp__.*search.*/i, 'explore'], [/mcp__.*list.*/i, 'explore'], [/mcp__.*get.*/i, 'explore'], [/mcp__.*fetch.*/i, 'explore'],
+  [/mcp__.*create.*/i, 'edit'], [/mcp__.*update.*/i, 'edit'], [/mcp__.*edit.*/i, 'edit'], [/mcp__.*write.*/i, 'edit'],
+  [/.*ExitPlanMode.*/i, 'orchestrate'], [/mcp__.*spawn.*/i, 'orchestrate'],
+];
+const TOOL_CLASSES = ['explore', 'edit', 'execute', 'orchestrate', 'other'];
+const TOOL_CLASS_LABEL = { explore: 'Explore', edit: 'Edit', execute: 'Execute', orchestrate: 'Orchestrate', other: 'Other' };
+
+function classifyTool(name) {
+  const exact = TOOL_CLASS_RULES.find(([n]) => n === name);
+  if (exact) return exact[1];
+  const wc = TOOL_CLASS_WILDCARDS.find(([re]) => re.test(name));
+  if (wc) return wc[1];
+  return 'other';
+}
+
+// A1. Interaction shape: per-row ratios with zero guard (user_turns == 0 excluded, count reported).
+function computeShapeRatios(rows) {
+  let excludedTurns = 0;
+  const msgsPerTurn = [];
+  const toolsPerTurn = [];
+  rows.forEach(r => {
+    const turns = r.main.user_turns;
+    if (!turns) { excludedTurns++; return; }
+    msgsPerTurn.push(r.main.assistant_messages / turns);
+    toolsPerTurn.push(sumToolCalls(r.main.tool_calls) / turns);
+  });
+  // one-shot rate: share of rows (with user_turns != 0) where user_turns == 1
+  const eligible = rows.filter(r => r.main.user_turns);
+  const oneShotRate = eligible.length ? eligible.filter(r => r.main.user_turns === 1).length / eligible.length : null;
+  return {
+    msgsPerTurnMedian: median(msgsPerTurn),
+    toolsPerTurnMedian: median(toolsPerTurn),
+    oneShotRate,
+    excludedTurns,
+    n: rows.length,
+  };
+}
+
+// A5. Verbosity: output tokens / assistant message, per row, median. Zero guard: assistant_messages == 0 excluded.
+function computeVerbosity(rows) {
+  let excluded = 0;
+  const vals = [];
+  rows.forEach(r => {
+    if (!r.main.assistant_messages) { excluded++; return; }
+    vals.push(r.main.output_tokens / r.main.assistant_messages);
+  });
+  return { median: median(vals), excluded };
+}
+
+// A3. Delegation propensity.
+function computeDelegation(rows) {
+  let excludedOutputShare = 0;
+  const shares = [];
+  rows.forEach(r => {
+    const denom = r.main.output_tokens + r.subagent.output_tokens;
+    if (!denom) { excludedOutputShare++; return; }
+    shares.push(r.subagent.output_tokens / denom);
+  });
+  const activeCount = rows.filter(r => r.subagent.messages > 0).length;
+  return {
+    subagentOutputShareMedian: median(shares),
+    excludedOutputShare,
+    subagentActiveRate: rows.length ? activeCount / rows.length : null,
+  };
+}
+
+// A4. Cache reuse (P1, included in table per spec §D item 6).
+function computeCacheReuse(rows) {
+  let excluded = 0;
+  const vals = [];
+  rows.forEach(r => {
+    const denom = r.main.cache_read_tokens + r.main.input_tokens;
+    if (!denom) { excluded++; return; }
+    vals.push(r.main.cache_read_tokens / denom);
+  });
+  return { median: median(vals), excluded };
+}
+
+// A2. Tool mix: per-model % across 5 classes.
+function computeToolMix(rows) {
+  const totals = { explore: 0, edit: 0, execute: 0, orchestrate: 0, other: 0 };
+  let grand = 0;
+  rows.forEach(r => {
+    Object.entries(r.main.tool_calls || {}).forEach(([name, count]) => {
+      const cls = classifyTool(name);
+      totals[cls] += count;
+      grand += count;
+    });
+  });
+  if (grand === 0) return null;
+  const pct = {};
+  TOOL_CLASSES.forEach(c => { pct[c] = (totals[c] / grand) * 100; });
+  return { pct, totals, grand };
+}
+
+// A6. Category x model usage-share matrix.
+function computeCategoryMatrix(models, allRows, normalization) {
+  const categories = Array.from(new Set(allRows.map(r => r.task_category))).sort();
+  const matrix = {}; // model -> category -> pct
+  models.forEach(model => {
+    const rows = allRows.filter(r => r.model === model);
+    matrix[model] = {};
+    if (normalization === 'row') {
+      const total = rows.length;
+      categories.forEach(cat => {
+        const c = rows.filter(r => r.task_category === cat).length;
+        matrix[model][cat] = total ? (c / total) * 100 : null;
+      });
+    }
+  });
+  if (normalization === 'col') {
+    categories.forEach(cat => {
+      const rowsInCat = allRows.filter(r => r.task_category === cat);
+      const total = rowsInCat.length;
+      models.forEach(model => {
+        const c = rowsInCat.filter(r => r.model === model).length;
+        matrix[model][cat] = total ? (c / total) * 100 : null;
+      });
+    });
+  }
+  return { categories, matrix };
+}
+
+// A7 helpers: autonomy phrase bin, tool class phrase.
+function autonomyPhrase(msgsPerTurnMedian) {
+  if (msgsPerTurnMedian === null || Number.isNaN(msgsPerTurnMedian)) return null;
+  if (msgsPerTurnMedian < 2) return 'a short exchange';
+  if (msgsPerTurnMedian <= 5) return 'a few steps';
+  return 'an extended run';
+}
+
+const TOOL_CLASS_PHRASE = {
+  explore: 'toward reading and searching',
+  edit: 'toward writing and editing',
+  execute: 'toward running commands',
+  orchestrate: 'toward delegating to subagents',
+  other: 'toward mixed tooling',
+};
+
+function dominantToolClass(pct) {
+  if (!pct) return null;
+  let best = null;
+  TOOL_CLASSES.forEach(c => {
+    if (best === null || pct[c] > pct[best]) best = c;
+  });
+  return best;
+}
+
+// ---------- render: shape cards (A1 + A5) ----------
+
+function renderShapeCards() {
+  const container = document.getElementById('shapeCards');
+  if (!container) return;
+  container.innerHTML = '';
+  const models = allModelsSeen().filter(m => visibleModels.has(m));
+
+  models.forEach(model => {
+    const rows = DATA.rows.filter(r => r.model === model);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.setProperty('--card-color', colorForModel(model));
+
+    if (rows.length === 0) {
+      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      container.appendChild(card);
+      return;
+    }
+
+    const shape = computeShapeRatios(rows);
+    const verbosity = computeVerbosity(rows);
+
+    const excludedNote = shape.excludedTurns > 0
+      ? `<div class="metric-row"><span class="k">Rows excluded (0 user turns)</span><span class="v">${shape.excludedTurns}</span></div>`
+      : '';
+
+    card.innerHTML = `
+      <h3>${model}</h3>
+      <div class="metric-row"><span class="k">Assistant msgs / user turn (median)</span><span class="v">${fmtNum(shape.msgsPerTurnMedian)}</span></div>
+      <div class="metric-row"><span class="k">Tool calls / user turn (median)</span><span class="v">${fmtNum(shape.toolsPerTurnMedian)}</span></div>
+      <div class="metric-row"><span class="k">One-shot rate</span><span class="v">${fmtPct(shape.oneShotRate)}</span></div>
+      <div class="metric-row"><span class="k">Output tokens / assistant msg (median)</span><span class="v">${fmtNum(verbosity.median)}</span></div>
+      ${excludedNote}
+    `;
+    container.appendChild(card);
+  });
+}
+
+// ---------- render: tool-mix fingerprint bars (A2) ----------
+
+function renderToolMix() {
+  const container = document.getElementById('toolMixBars');
+  if (!container) return;
+  container.innerHTML = '';
+  const models = allModelsSeen().filter(m => visibleModels.has(m));
+
+  models.forEach(model => {
+    const rows = DATA.rows.filter(r => r.model === model);
+    const row = document.createElement('div');
+    row.className = 'tool-mix-row';
+
+    const mix = computeToolMix(rows);
+    const heading = document.createElement('h4');
+    heading.textContent = model;
+    row.appendChild(heading);
+
+    const track = document.createElement('div');
+    track.className = 'tool-mix-stack';
+
+    const TOOL_CLASS_COLOR_VAR = {
+      explore: '--c-opus', edit: '--c-fable', execute: '--good', orchestrate: '--c-sonnet', other: '--muted',
+    };
+
+    if (!mix) {
+      track.innerHTML = `<span class="empty">—</span>`;
+    } else {
+      TOOL_CLASSES.forEach(cls => {
+        const pct = mix.pct[cls];
+        if (pct <= 0) return;
+        const seg = document.createElement('div');
+        seg.className = 'tool-mix-seg';
+        seg.style.width = pct + '%';
+        seg.style.background = `var(${TOOL_CLASS_COLOR_VAR[cls]})`;
+        seg.title = `${TOOL_CLASS_LABEL[cls]}: ${pct.toFixed(1)}%`;
+        seg.textContent = pct >= 8 ? pct.toFixed(0) + '%' : '';
+        track.appendChild(seg);
+      });
+    }
+    row.appendChild(track);
+
+    if (mix) {
+      const legend = document.createElement('div');
+      legend.className = 'tool-mix-legend';
+      legend.innerHTML = TOOL_CLASSES.map(cls =>
+        `<span><span class="sw" style="background:var(${TOOL_CLASS_COLOR_VAR[cls]})"></span>${TOOL_CLASS_LABEL[cls]} ${mix.pct[cls].toFixed(1)}%</span>`
+      ).join('');
+      row.appendChild(legend);
+    }
+
+    container.appendChild(row);
+  });
+}
+
+// ---------- render: category x model heatmap (A6) ----------
+
+let heatmapNormalization = 'row';
+
+function renderHeatmap() {
+  const container = document.getElementById('heatmapSection');
+  if (!container) return;
+  const models = allModelsSeen().filter(m => visibleModels.has(m));
+  const { categories, matrix } = computeCategoryMatrix(models, DATA.rows, heatmapNormalization);
+
+  const head = document.getElementById('heatmapTableHead');
+  const body = document.getElementById('heatmapTableBody');
+
+  head.innerHTML = '<th>Model</th>' + categories.map(c => `<th>${c}</th>`).join('');
+  body.innerHTML = '';
+
+  models.forEach(model => {
+    const tr = document.createElement('tr');
+    let cells = `<td class="metric-name">${model}</td>`;
+    categories.forEach(cat => {
+      const pct = matrix[model][cat];
+      if (pct === null || pct === undefined) {
+        cells += `<td class="empty-col">—</td>`;
+      } else {
+        const alpha = Math.min(0.85, pct / 100 + 0.06);
+        cells += `<td><div class="heatmap-cell" style="background: rgba(217, 122, 52, ${alpha})">${pct.toFixed(1)}%</div></td>`;
+      }
+    });
+    tr.innerHTML = cells;
+    body.appendChild(tr);
+  });
+
+}
+
+// ---------- render: suggested-use panel (A7) — binding wording, verbatim template ----------
+
+function renderSuggestedUse() {
+  const container = document.getElementById('suggestedUseCards');
+  if (!container) return;
+  container.innerHTML = '';
+  const models = allModelsSeen().filter(m => visibleModels.has(m));
+
+  models.forEach(model => {
+    const rows = DATA.rows.filter(r => r.model === model);
+    const card = document.createElement('div');
+    card.className = 'card suggested-use-card';
+    card.style.setProperty('--card-color', colorForModel(model));
+
+    if (rows.length === 0) {
+      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      container.appendChild(card);
+      return;
+    }
+
+    const { categories, matrix } = computeCategoryMatrix([model], DATA.rows, 'row');
+    const shares = categories
+      .map(cat => ({ cat, pct: matrix[model][cat] }))
+      .filter(c => c.pct !== null && c.pct > 0)
+      .sort((a, b) => b.pct - a.pct);
+
+    const mix = computeToolMix(rows);
+    const domClass = dominantToolClass(mix ? mix.pct : null);
+    const toolPhrase = domClass ? TOOL_CLASS_PHRASE[domClass] : 'toward mixed tooling';
+
+    const shape = computeShapeRatios(rows);
+    const autonomy = autonomyPhrase(shape.msgsPerTurnMedian);
+
+    let catSentence;
+    if (shares.length === 0) {
+      catSentence = `In your usage, sessions on ${model} did not have a clear category breakdown.`;
+    } else if (shares.length === 1) {
+      catSentence = `In your usage, sessions on ${model} most often looked like ${shares[0].cat} (${shares[0].pct.toFixed(0)}%).`;
+    } else {
+      catSentence = `In your usage, sessions on ${model} most often looked like ${shares[0].cat} (${shares[0].pct.toFixed(0)}%) and ${shares[1].cat} (${shares[1].pct.toFixed(0)}%).`;
+    }
+
+    const autonomyText = autonomy || 'a short exchange';
+
+    card.innerHTML = `
+      <h3>${model}</h3>
+      <p class="suggested-text">
+        ${catSentence}
+        These sessions leaned ${toolPhrase} and averaged ${autonomyText} per prompt.
+        Based on ${rows.length} session(s).
+      </p>
+    `;
+    container.appendChild(card);
   });
 }
 

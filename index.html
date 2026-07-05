@@ -21,11 +21,35 @@
 
 <main id="mainContent" style="display:none">
 
+  <section id="suggestedUseSection">
+    <h2>Suggested use — observed patterns</h2>
+    <div class="caveat" id="suggestedUseCaveat">
+      How to read this: these are observations about YOUR sessions, not claims about the models.
+      Which model ran a session was decided by routing and habit, not a fair test — so this reflects
+      what you reached for, not what any model is best at. Small cohorts (some models have well under
+      50 sessions) make these patterns noisy. This panel never ranks models or recommends one over
+      another.
+    </div>
+    <div id="suggestedUseCards" class="cards"></div>
+  </section>
+
   <section id="overviewSection">
     <h2>Overview</h2>
     <p class="hint">Session count, median output tokens, median active duration, median user turns per model. Toggle chips to add models beyond the three defaults. All sessions — the filter bar below applies to the comparison table only.</p>
     <div id="modelChips" class="chip-row"></div>
     <div id="overviewCards" class="cards"></div>
+  </section>
+
+  <section id="shapeSection">
+    <h2>Interaction shape</h2>
+    <p class="hint">Per-row ratios (autonomy/verbosity proxies), medianed across each model's cohort — not pooled, so one large session can't dominate. Rows with a zero denominator are excluded from that ratio; excluded counts shown.</p>
+    <div id="shapeCards" class="cards"></div>
+  </section>
+
+  <section id="toolMixSection">
+    <h2>Tool-mix fingerprint</h2>
+    <p class="hint">Each model's tool calls (main-chain only) bucketed into explore / edit / execute / orchestrate / other, normalized to % of that model's total calls. This is a fingerprint of how a model tends to work, not a quality signal.</p>
+    <div id="toolMixBars" class="tool-mix"></div>
   </section>
 
   <section id="tableSection">
@@ -61,6 +85,20 @@
       <table id="compareTable">
         <thead><tr id="compareTableHead"></tr></thead>
         <tbody id="compareTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="heatmapSection">
+    <h2>Category × model usage share</h2>
+    <p class="hint">Row-normalized by default: within a model, the % of its sessions in each task category (rows sum to 100%). Toggle to column-normalized: within a category, the % of sessions that ran on each model (columns sum to 100%). Cohort-size caveat applies — small cohorts make percentages noisy.</p>
+    <div class="chart-controls">
+      <label><input type="checkbox" id="heatmapNormToggle"> Column-normalized (within category, by model)</label>
+    </div>
+    <div class="table-scroll">
+      <table id="heatmapTable">
+        <thead><tr id="heatmapTableHead"></tr></thead>
+        <tbody id="heatmapTableBody"></tbody>
       </table>
     </div>
   </section>
