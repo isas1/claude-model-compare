@@ -155,6 +155,11 @@ code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-siz
   border-radius: 10px;
   background: var(--panel);
 }
+/* Numbers everywhere align on a fixed digit grid — this is a stats page */
+td, .metric-row .v, .bar-num, .median, .mean, .heatmap-cell, .axis-label, .tool-mix-seg, .tool-mix-legend {
+  font-variant-numeric: tabular-nums;
+}
+
 table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
 th { text-align: left; color: var(--muted); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 td { padding: 8px 14px; border-bottom: 1px solid var(--panel2); vertical-align: top; white-space: nowrap; }
