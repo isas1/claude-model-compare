@@ -506,7 +506,7 @@ function renderChart() {
   yAxisTitle.textContent = yTitle;
   svg.appendChild(yAxisTitle);
 
-  // points
+  // points — hoverable AND keyboard-focusable; native SVG <title> covers touch long-press
   points.forEach(p => {
     const cx = xScale(p.ts);
     const cy = yScale(p.val);
@@ -515,8 +515,14 @@ function renderChart() {
       fill: colorForModel(p.model).startsWith('var') ? getComputedColor(p.model) : p.model,
       opacity: 0.75,
       class: 'dot-point',
+      tabindex: 0,
+      role: 'img',
+      'aria-label': `${p.model}, ${fmtNum(p.val)} output tokens, project ${p.project}`,
     });
-    circle.addEventListener('mouseenter', (e) => {
+    const svgTitle = document.createElementNS(ns, 'title');
+    svgTitle.textContent = `${p.model} — ${fmtNum(p.val)} output tokens (${p.project})`;
+    circle.appendChild(svgTitle);
+    const showTooltip = () => {
       tooltip.style.display = 'block';
       tooltip.innerHTML = `
         <div class="tt-row"><span class="k">Model</span><span>${escapeHtml(p.model)}</span></div>
@@ -524,14 +530,20 @@ function renderChart() {
         <div class="tt-row"><span class="k">Project</span><span>${escapeHtml(p.project)}</span></div>
         <div class="tt-row"><span class="k">Output tokens</span><span>${fmtNum(p.val)}</span></div>
       `;
+    };
+    circle.addEventListener('mouseenter', showTooltip);
+    circle.addEventListener('focus', () => {
+      showTooltip();
+      const r = circle.getBoundingClientRect();
+      tooltip.style.left = (r.right + 10) + 'px';
+      tooltip.style.top = (r.top + 10) + 'px';
     });
     circle.addEventListener('mousemove', (e) => {
       tooltip.style.left = (e.clientX + 14) + 'px';
       tooltip.style.top = (e.clientY + 14) + 'px';
     });
-    circle.addEventListener('mouseleave', () => {
-      tooltip.style.display = 'none';
-    });
+    circle.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+    circle.addEventListener('blur', () => { tooltip.style.display = 'none'; });
     svg.appendChild(circle);
   });
 

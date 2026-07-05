@@ -220,7 +220,12 @@ svg.chart { display: block; }
 .axis-label { fill: var(--muted); font-size: 10px; }
 .axis-line { stroke: var(--border); stroke-width: 1; }
 .grid-line { stroke: var(--panel2); stroke-width: 1; }
-.dot-point { cursor: pointer; }
+.dot-point { cursor: pointer; transition: opacity 0.1s; }
+.dot-point:hover, .dot-point:focus-visible { opacity: 1; stroke: var(--text); stroke-width: 1.5; }
+
+/* Row hover on data tables — anchors the eye while scanning wide rows */
+tbody tr:hover td { background: rgba(255, 255, 255, 0.025); }
+tbody tr.section-label:hover td { background: var(--panel2); }
 #tooltip {
   position: fixed;
   pointer-events: none;
