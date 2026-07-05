@@ -37,6 +37,21 @@ HAIKU_LABEL = "Haiku 4.5"
 
 DURATION_GAP_CAP_MS = 300_000  # 5 minutes (§5a)
 
+# §4 (amended): measured fallback baseline is ~20% (dominated by queued user
+# messages, Lead-reviewed and accepted). Escalate only when fallback
+# materially exceeds that baseline (>30%).
+FALLBACK_WARN_PCT = 30.0
+
+# (source key in message.usage, output key in our blocks)
+USAGE_KEYS = (
+    ("output_tokens", "output_tokens"),
+    ("input_tokens", "input_tokens"),
+    ("cache_read_input_tokens", "cache_read_tokens"),
+    ("cache_creation_input_tokens", "cache_creation_tokens"),
+)
+BLOCK_TOKEN_KEYS = ("output_tokens", "input_tokens",
+                     "cache_read_tokens", "cache_creation_tokens")
+
 # Task category keyword lists, in priority order (§5b). debug-fix checked
 # first. First category with any keyword hit (case-insensitive substring) wins.
 TASK_CATEGORY_RULES = [
@@ -64,22 +79,36 @@ TASK_CATEGORY_RULES = [
 DEFAULT_TASK_CATEGORY = "other"
 
 
+class SkipLine(Exception):
+    """Raised during per-line parsing when the line must be skipped
+    (counted in lines_skipped) per §0 skip rules / crash hardening."""
+
+
 def normalize_model(raw):
     """Map a raw message.model string to its display label.
 
-    Returns None for <synthetic> / null / empty — caller must skip the line
-    (these never produce a row). Any other unrecognized id is returned
+    Returns None (caller skips the line) for <synthetic> / null / empty /
+    NOT A STRING (§0 amended). Any other unrecognized string id is returned
     verbatim (§1: "anything else ... the raw id, verbatim").
     """
-    if not raw:
+    if not isinstance(raw, str):
         return None
-    if raw == "<synthetic>":
+    if not raw or raw == "<synthetic>":
         return None
     if raw in MODEL_MAP:
         return MODEL_MAP[raw]
     if raw.startswith(HAIKU_PREFIX):
         return HAIKU_LABEL
     return raw
+
+
+def safe_int(v):
+    """§0 (amended): numeric usage fields coerce via int(); a non-coercible
+    value counts as 0 without losing the line's other data."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
 
 
 def classify_task_category(text):
@@ -168,6 +197,15 @@ def extract_texts(content):
     return ""
 
 
+def _check_hashable(value):
+    """Raise SkipLine if value is unhashable (list/dict/...) — §0 amended
+    crash-hardening rule for tool_use name/id and uuid fields."""
+    try:
+        hash(value)
+    except TypeError:
+        raise SkipLine()
+
+
 def empty_main_block():
     return {
         "assistant_messages": 0,
@@ -194,11 +232,16 @@ def empty_subagent_block():
 
 
 class RowState:
-    """Mutable accumulation state for one (session_id, model) row."""
+    """Mutable accumulation state for one (session_id, model) row.
+
+    Main-line and subagent-line timestamps are tracked SEPARATELY (§6:
+    start_ts/end_ts use main-line timestamps when the row has main lines,
+    subagent timestamps ONLY for subagent-only rows)."""
 
     __slots__ = (
         "session_id", "model", "project", "task_category",
-        "start_ms", "end_ms", "main", "subagent", "main_events",
+        "main_start_ms", "main_end_ms", "sub_start_ms", "sub_end_ms",
+        "main", "subagent", "main_events",
     )
 
     def __init__(self, session_id, model):
@@ -206,19 +249,29 @@ class RowState:
         self.model = model
         self.project = None
         self.task_category = None
-        self.start_ms = None
-        self.end_ms = None
+        self.main_start_ms = None
+        self.main_end_ms = None
+        self.sub_start_ms = None
+        self.sub_end_ms = None
         self.main = empty_main_block()
         self.subagent = empty_subagent_block()
         self.main_events = []  # list of ts_ms for main-only duration calc
 
-    def touch_ts(self, ts_ms):
+    def touch_main_ts(self, ts_ms):
         if ts_ms is None:
             return
-        if self.start_ms is None or ts_ms < self.start_ms:
-            self.start_ms = ts_ms
-        if self.end_ms is None or ts_ms > self.end_ms:
-            self.end_ms = ts_ms
+        if self.main_start_ms is None or ts_ms < self.main_start_ms:
+            self.main_start_ms = ts_ms
+        if self.main_end_ms is None or ts_ms > self.main_end_ms:
+            self.main_end_ms = ts_ms
+
+    def touch_sub_ts(self, ts_ms):
+        if ts_ms is None:
+            return
+        if self.sub_start_ms is None or ts_ms < self.sub_start_ms:
+            self.sub_start_ms = ts_ms
+        if self.sub_end_ms is None or ts_ms > self.sub_end_ms:
+            self.sub_end_ms = ts_ms
 
 
 def get_or_create_row(rows, session_id, model):
@@ -235,10 +288,12 @@ class Counters:
         self.top_level_files_seen = 0
         self.files_with_data = 0
         self.files_nested_scanned = 0
+        self.files_nested_orphaned = 0
         self.lines_skipped = 0
         self.chain = 0
         self.fallback = 0
         self.dropped = 0
+        self.tool_id_collisions = 0
         self.models_seen = set()
 
 
@@ -277,7 +332,6 @@ def iter_nested_agent_files(project_dir):
     (subagents/workflows/wf_*/agent-*.jsonl) attribute correctly — a naive
     dirname() would return "wf_*" and silently orphan them.
     """
-    marker = "subagents" + os.sep
     for dirpath, _dirnames, filenames in os.walk(project_dir):
         rel = os.path.relpath(dirpath, project_dir)
         if rel == "." or "subagents" not in rel.split(os.sep):
@@ -296,23 +350,74 @@ def iter_nested_agent_files(project_dir):
 
 
 # ---------------------------------------------------------------------------
+# Guarded per-line parsers (§0 amended crash hardening). Parsing is separated
+# from applying so a skipped line never leaves partial mutations on a row.
+# ---------------------------------------------------------------------------
+
+def _parse_assistant_line(line):
+    """Validate + extract everything needed from an assistant line.
+    Returns (model, usage_dict keyed by our block keys, tool_uses list of
+    (name, tid)) or raises SkipLine. Performs NO row mutation."""
+    msg = line.get("message")
+    if not isinstance(msg, dict):
+        raise SkipLine()
+    model = normalize_model(msg.get("model"))
+    if model is None:
+        raise SkipLine()
+
+    usage_raw = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
+    usage = {out_key: safe_int(usage_raw.get(src_key))
+             for src_key, out_key in USAGE_KEYS}
+
+    tool_uses = []
+    content = msg.get("content")
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_use":
+                name = c.get("name")
+                tid = c.get("id")
+                _check_hashable(name)   # unhashable name/id -> skip line (§0)
+                _check_hashable(tid)
+                tool_uses.append((name or "unknown", tid))
+    return model, usage, tool_uses
+
+
+def _parse_user_error_results(line):
+    """Extract the tool_use_ids of is_error:true tool_result blocks from a
+    user line. Raises SkipLine on non-dict message or unhashable ids.
+    Performs NO row mutation."""
+    msg = line.get("message")
+    if not isinstance(msg, dict):
+        raise SkipLine()
+    tids = []
+    content = msg.get("content")
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("is_error") is True:
+                tid = c.get("tool_use_id")
+                _check_hashable(tid)
+                if tid is not None:
+                    tids.append(tid)
+    return tids
+
+
+# ---------------------------------------------------------------------------
 # Top-level (main session) file processing
 # ---------------------------------------------------------------------------
 
-def process_top_level_file(path, rows, counters):
+def process_top_level_file(path, rows, counters, session_meta=None):
     """Process one top-level session file. Returns True if it produced >=1
-    kept line (counts toward files_with_data).
+    kept line (counts toward files_with_data). Records the session's
+    project / task_category into session_meta — session-level fields stamped
+    onto ALL of the session's rows (including subagent-only rows created
+    later from nested files) by the reconciliation pass in collect().
 
-    The file is streamed once, line by line. Per-line side effects that don't
-    need lookahead (token/tool_call/tool_error accumulation) are applied
-    immediately. Qualifying user turns and assistant lines are additionally
-    appended, in file order, to a small in-memory `events` list, and a
-    parentUuid->child map is built across ALL parsed lines, so that a second
-    pass can resolve user-turn attribution (TRANSITIVE parentUuid chain-walk
-    per amended §4, else nearest FOLLOWING assistant line in file order, else
-    drop) without re-reading the file. Neither structure holds line content —
-    only ids/types/timestamps — so this does not defeat the "stream, don't
-    load whole file" constraint.
+    The file is streamed once, line by line. Per-line parsing is guarded
+    (§0 amended: any exception while processing a line skips that line and
+    never aborts the file). User-turn attribution and the tool-error id-join
+    are resolved AFTER the stream from small in-memory structures (ids,
+    types, positions — never content), making both order-independent within
+    the file.
     """
     session_id = os.path.basename(path)
     if session_id.endswith(".jsonl"):
@@ -323,22 +428,28 @@ def process_top_level_file(path, rows, counters):
     first_user_text = None
     first_user_seen = False
 
-    # tool_use.id -> ("main"|"subagent", model); join within this file only.
-    tool_use_model = {}
+    # tool_use.id -> ("main"|"subagent", model); first occurrence in file
+    # order wins (§0 amended); collisions counted for the run summary.
+    tool_use_map = {}
+    # tool_use_ids of is_error:true results; join resolved after the stream
+    # so a result-before-use ordering still counts (§5 has no ordering
+    # qualifier).
+    pending_error_tids = []
 
     # File-order event list for the attribution pass:
-    #   ("assistant", parentUuid, uuid, model, ts_ms)
-    #   ("user_turn", None, uuid, None, ts_ms)
+    #   ("assistant", model, ts_ms)
+    #   ("user_turn", uuid, ts_ms, pos)
     events = []
 
-    # parentUuid -> child-line info for the TRANSITIVE chain-walk (§4,
-    # amended). Recorded for EVERY parsed line regardless of type, because
-    # the chain threads through skipped types (attachment, system,
-    # last-prompt, custom-title, mode, ...). First child in file order wins
-    # (transcripts are append-only; the chain is linear in practice).
-    # Value: (type, uuid, main_assistant_model_or_None)
-    parent_to_child = {}
+    # parentUuid -> ordered list of (pos, type, uuid, main_assistant_model)
+    # for the TRANSITIVE chain-walk (§4 amended). Recorded for EVERY parsed
+    # line regardless of type. ALL children are kept (never first-only /
+    # last-writer-wins): duplicate uuids exist in real files (§0 amended)
+    # and are resolved positionally — the walk takes the nearest child AT OR
+    # AFTER the current position in file order.
+    parent_to_children = {}
 
+    pos = -1
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for raw in f:
             raw = raw.strip()
@@ -352,129 +463,134 @@ def process_top_level_file(path, rows, counters):
             if not isinstance(line, dict):
                 counters.lines_skipped += 1
                 continue
+            pos += 1
 
-            ltype = line.get("type")
+            try:
+                ltype = line.get("type")
 
-            # Chain-walk bookkeeping happens BEFORE any type skip: skipped
-            # line types still carry the uuid/parentUuid links the walk must
-            # traverse.
-            _puid = line.get("parentUuid")
-            if _puid and _puid not in parent_to_child:
-                _walk_model = None
-                if ltype == "assistant" and line.get("isSidechain") is not True:
-                    _wmsg = line.get("message")
-                    if isinstance(_wmsg, dict):
-                        _walk_model = normalize_model(_wmsg.get("model"))
-                parent_to_child[_puid] = (ltype, line.get("uuid"), _walk_model)
+                # Chain-walk bookkeeping BEFORE any type skip: skipped line
+                # types still carry the uuid/parentUuid links the walk must
+                # traverse.
+                puid = line.get("parentUuid")
+                _check_hashable(puid)
+                if puid:
+                    walk_model = None
+                    if ltype == "assistant" and line.get("isSidechain") is not True:
+                        wmsg = line.get("message")
+                        if isinstance(wmsg, dict):
+                            walk_model = normalize_model(wmsg.get("model"))
+                    parent_to_children.setdefault(puid, []).append(
+                        (pos, ltype, line.get("uuid"), walk_model))
 
-            if ltype not in ("user", "assistant"):
+                if ltype not in ("user", "assistant"):
+                    counters.lines_skipped += 1
+                    continue
+
+                if project is None and isinstance(line.get("cwd"), str) and line.get("cwd"):
+                    project = os.path.basename(line["cwd"].rstrip("/"))
+
+                ts_ms = parse_ts(line.get("timestamp"))
+
+                if ltype == "assistant":
+                    # Parse (guarded, no mutation) ...
+                    model, usage, tool_uses = _parse_assistant_line(line)
+
+                    # ... then apply (validated inputs; cannot raise).
+                    counters.models_seen.add(model)
+                    is_sidechain = line.get("isSidechain") is True
+                    row = get_or_create_row(rows, session_id, model)
+                    produced_data = True
+
+                    scope = "subagent" if is_sidechain else "main"
+                    block = row.subagent if is_sidechain else row.main
+                    if scope == "main":
+                        block["assistant_messages"] += 1
+                    else:
+                        block["messages"] += 1
+                    for out_key in BLOCK_TOKEN_KEYS:
+                        block[out_key] += usage[out_key]
+                    for name, tid in tool_uses:
+                        block["tool_calls"][name] = block["tool_calls"].get(name, 0) + 1
+                        if tid is not None:
+                            if tid in tool_use_map:
+                                counters.tool_id_collisions += 1
+                            else:
+                                tool_use_map[tid] = (scope, model)
+
+                    # §6 main-wins rule: inline-sidechain lines feed the
+                    # SUBAGENT timestamp track, never main start/end.
+                    if is_sidechain:
+                        row.touch_sub_ts(ts_ms)
+                    else:
+                        row.touch_main_ts(ts_ms)
+                        if ts_ms is not None:
+                            row.main_events.append(ts_ms)
+                        events.append(("assistant", model, ts_ms))
+                    # Inline sidechain assistant lines (§3 fallback path) do
+                    # not participate in user-turn attribution.
+
+                else:  # ltype == "user"
+                    # Guarded extraction; join deferred to end-of-file.
+                    tids = _parse_user_error_results(line)
+                    pending_error_tids.extend(tids)
+
+                    if is_qualifying_user_turn(line):
+                        produced_data = True
+                        if not first_user_seen:
+                            first_user_seen = True
+                            first_user_text = extract_texts(line["message"].get("content"))
+                        events.append(("user_turn", line.get("uuid"), ts_ms, pos))
+
+            except SkipLine:
+                counters.lines_skipped += 1
+                continue
+            except Exception:
+                # §0 amended: ANY exception while processing a line skips
+                # that line and increments lines_skipped; a bad line never
+                # aborts a file.
                 counters.lines_skipped += 1
                 continue
 
-            if project is None and isinstance(line.get("cwd"), str) and line.get("cwd"):
-                project = os.path.basename(line["cwd"].rstrip("/"))
+    # --- Tool-error id-join (order-independent within this file, §5) ---
+    for tid in pending_error_tids:
+        info = tool_use_map.get(tid)
+        if info:
+            scope, tmodel = info
+            target_row = get_or_create_row(rows, session_id, tmodel)
+            if scope == "main":
+                target_row.main["tool_errors"] += 1
+            else:
+                target_row.subagent["tool_errors"] += 1
 
-            ts_ms = parse_ts(line.get("timestamp"))
-
-            if ltype == "assistant":
-                msg = line.get("message")
-                if not isinstance(msg, dict):
-                    counters.lines_skipped += 1
-                    continue
-                model = normalize_model(msg.get("model"))
-                if model is None:
-                    counters.lines_skipped += 1
-                    continue
-
-                counters.models_seen.add(model)
-                is_sidechain = line.get("isSidechain") is True
-                row = get_or_create_row(rows, session_id, model)
-                if project:
-                    row.project = project
-                produced_data = True
-
-                content = msg.get("content")
-                usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
-
-                scope = "subagent" if is_sidechain else "main"
-                block = row.subagent if is_sidechain else row.main
-                if scope == "main":
-                    block["assistant_messages"] += 1
-                else:
-                    block["messages"] += 1
-                block["output_tokens"] += int(usage.get("output_tokens") or 0)
-                block["input_tokens"] += int(usage.get("input_tokens") or 0)
-                block["cache_read_tokens"] += int(usage.get("cache_read_input_tokens") or 0)
-                block["cache_creation_tokens"] += int(usage.get("cache_creation_input_tokens") or 0)
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "tool_use":
-                            name = c.get("name") or "unknown"
-                            block["tool_calls"][name] = block["tool_calls"].get(name, 0) + 1
-                            tid = c.get("id")
-                            if tid:
-                                tool_use_model[tid] = (scope, model)
-
-                row.touch_ts(ts_ms)
-                if scope == "main" and ts_ms is not None:
-                    row.main_events.append(ts_ms)
-
-                if not is_sidechain:
-                    events.append(("assistant", line.get("parentUuid"), line.get("uuid"), model, ts_ms))
-                # Inline sidechain assistant lines (§3 fallback path) do not
-                # participate in user-turn attribution and are never main.
-
-            else:  # ltype == "user"
-                msg = line.get("message")
-                if not isinstance(msg, dict):
-                    counters.lines_skipped += 1
-                    continue
-
-                # tool_result / is_error join — applies to any user line
-                # (join within this file only), independent of whether the
-                # line also qualifies as a user turn.
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("is_error") is True:
-                            tid = c.get("tool_use_id")
-                            info = tool_use_model.get(tid) if tid else None
-                            if info:
-                                scope, tmodel = info
-                                target_row = get_or_create_row(rows, session_id, tmodel)
-                                if scope == "main":
-                                    target_row.main["tool_errors"] += 1
-                                else:
-                                    target_row.subagent["tool_errors"] += 1
-
-                if is_qualifying_user_turn(line):
-                    produced_data = True
-                    if not first_user_seen:
-                        first_user_seen = True
-                        first_user_text = extract_texts(content)
-                    events.append(("user_turn", None, line.get("uuid"), None, ts_ms))
-
-    # --- Pass 2: user-turn attribution (transitive chain-walk, §4 amended) ---
+    # --- User-turn attribution (transitive chain-walk, §4 amended) ---
     for idx, ev in enumerate(events):
         if ev[0] != "user_turn":
             continue
-        _, _, user_uuid, _, ts_ms = ev
+        _, user_uuid, ts_ms, user_pos = ev
         attributed_model = None
         method = None
 
         if user_uuid:
             # TRANSITIVE chain-walk: follow parentUuid links forward through
-            # any non-user, non-assistant line types. Stop with credit on an
-            # assistant line; stop and fall back on hitting another USER
-            # line, exceeding 50 hops, or a dead-end. Inline-sidechain
-            # assistant lines (walk_model None) are treated as intermediates
-            # — §3 excludes them from user-turn attribution everywhere.
-            cur = user_uuid
+            # any non-user, non-assistant line types. Duplicate uuids (§0
+            # amended) are resolved positionally: among all lines whose
+            # parentUuid == current uuid, take the nearest one AT OR AFTER
+            # the current position in file order — never dict-last-writer.
+            # Stop with credit on an assistant line; stop and fall back on
+            # hitting another USER line, exceeding 50 hops, or a dead-end.
+            # Inline-sidechain / synthetic assistant lines (walk_model None)
+            # are intermediates — §3/§1 exclude them from attribution.
+            cur_uuid = user_uuid
+            cur_pos = user_pos
             for _hop in range(50):
-                child = parent_to_child.get(cur)
+                child = None
+                for cand in parent_to_children.get(cur_uuid, ()):
+                    if cand[0] > cur_pos:
+                        child = cand
+                        break
                 if child is None:
-                    break  # dead-end -> fallback
-                ctype, cuuid, cmodel = child
+                    break  # dead-end (or nothing at/after) -> fallback
+                cpos, ctype, cuuid, cmodel = child
                 if ctype == "assistant" and cmodel is not None:
                     attributed_model = cmodel
                     method = "chain"
@@ -483,13 +599,14 @@ def process_top_level_file(path, rows, counters):
                     break  # hit another user line -> fallback
                 if not cuuid:
                     break  # unlinked intermediate -> dead-end -> fallback
-                cur = cuuid
+                cur_uuid = cuuid
+                cur_pos = cpos
 
         if attributed_model is None:
             # Fallback: nearest FOLLOWING assistant line in file order.
             for j in range(idx + 1, len(events)):
                 if events[j][0] == "assistant":
-                    attributed_model = events[j][3]
+                    attributed_model = events[j][1]
                     method = "fallback"
                     break
 
@@ -500,7 +617,7 @@ def process_top_level_file(path, rows, counters):
 
         target_row = get_or_create_row(rows, session_id, attributed_model)
         target_row.main["user_turns"] += 1
-        target_row.touch_ts(ts_ms)
+        target_row.touch_main_ts(ts_ms)
         if ts_ms is not None:
             target_row.main_events.append(ts_ms)
         if method == "chain":
@@ -508,17 +625,16 @@ def process_top_level_file(path, rows, counters):
         else:
             counters.fallback += 1
 
-    # Task category: from first qualifying user turn's text only (§5b).
+    # Session-level metadata (§5/§5b: project and task_category are
+    # session-level, not per-model). Stamping happens in collect()'s
+    # reconciliation pass, AFTER nested files may have created
+    # subagent-only rows for this session.
     category = classify_task_category(first_user_text or "") if first_user_seen else DEFAULT_TASK_CATEGORY
-
-    # Apply project + task_category to every row created for this session
-    # (session-level fields, not per-model).
-    for (sid, _model), row in rows.items():
-        if sid != session_id:
-            continue
-        if row.project is None:
-            row.project = project if project else "unknown"
-        row.task_category = category
+    if session_meta is not None:
+        session_meta[session_id] = {
+            "project": project,
+            "task_category": category,
+        }
 
     return produced_data
 
@@ -530,8 +646,11 @@ def process_top_level_file(path, rows, counters):
 def process_nested_file(path, parent_session_id, rows, counters):
     """Process one nested subagent .jsonl file. All contributions go to the
     SUBAGENT block of (parent_session_id, this line's own model). The
-    tool_use.id join happens WITHIN this file only — never crosses files."""
-    tool_use_model = {}  # tool_use.id -> model, local to this nested file
+    tool_use.id join happens WITHIN this file only (never crosses files) and
+    is order-independent (resolved after the stream). Duplicate tool ids:
+    first occurrence wins, collisions counted."""
+    tool_use_map = {}       # tool_use.id -> model, local to this nested file
+    pending_error_tids = []
 
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for raw in f:
@@ -547,64 +666,53 @@ def process_nested_file(path, parent_session_id, rows, counters):
                 counters.lines_skipped += 1
                 continue
 
-            ltype = line.get("type")
-            if ltype not in ("user", "assistant"):
+            try:
+                ltype = line.get("type")
+                if ltype not in ("user", "assistant"):
+                    counters.lines_skipped += 1
+                    continue
+
+                ts_ms = parse_ts(line.get("timestamp"))
+
+                if ltype == "assistant":
+                    model, usage, tool_uses = _parse_assistant_line(line)
+
+                    counters.models_seen.add(model)
+                    row = get_or_create_row(rows, parent_session_id, model)
+                    # §6: subagent timestamps tracked separately — used for
+                    # start_ts/end_ts ONLY when the row has no main lines.
+                    row.touch_sub_ts(ts_ms)
+
+                    block = row.subagent
+                    block["messages"] += 1
+                    for out_key in BLOCK_TOKEN_KEYS:
+                        block[out_key] += usage[out_key]
+                    for name, tid in tool_uses:
+                        block["tool_calls"][name] = block["tool_calls"].get(name, 0) + 1
+                        if tid is not None:
+                            if tid in tool_use_map:
+                                counters.tool_id_collisions += 1
+                            else:
+                                tool_use_map[tid] = model
+                    # Subagent user-role lines never count as messages/turns.
+
+                else:  # user line in nested file — error-result join only
+                    tids = _parse_user_error_results(line)
+                    pending_error_tids.extend(tids)
+
+            except SkipLine:
+                counters.lines_skipped += 1
+                continue
+            except Exception:
                 counters.lines_skipped += 1
                 continue
 
-            ts_ms = parse_ts(line.get("timestamp"))
-
-            if ltype == "assistant":
-                msg = line.get("message")
-                if not isinstance(msg, dict):
-                    counters.lines_skipped += 1
-                    continue
-                model = normalize_model(msg.get("model"))
-                if model is None:
-                    counters.lines_skipped += 1
-                    continue
-                counters.models_seen.add(model)
-
-                row = get_or_create_row(rows, parent_session_id, model)
-                # Subagent-only rows MUST carry real dates from subagent
-                # timestamps (never null when timestamps exist) — §6.
-                row.touch_ts(ts_ms)
-
-                usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
-                block = row.subagent
-                block["messages"] += 1
-                block["output_tokens"] += int(usage.get("output_tokens") or 0)
-                block["input_tokens"] += int(usage.get("input_tokens") or 0)
-                block["cache_read_tokens"] += int(usage.get("cache_read_input_tokens") or 0)
-                block["cache_creation_tokens"] += int(usage.get("cache_creation_input_tokens") or 0)
-
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "tool_use":
-                            name = c.get("name") or "unknown"
-                            block["tool_calls"][name] = block["tool_calls"].get(name, 0) + 1
-                            tid = c.get("id")
-                            if tid:
-                                tool_use_model[tid] = model
-                # Subagent user-role lines never count as messages/turns —
-                # nothing further to do for them below except the tool_result
-                # join, handled in the else branch.
-
-            else:  # user line in nested file — tool_result / is_error join only
-                msg = line.get("message")
-                if not isinstance(msg, dict):
-                    counters.lines_skipped += 1
-                    continue
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("is_error") is True:
-                            tid = c.get("tool_use_id")
-                            model = tool_use_model.get(tid) if tid else None
-                            if model:
-                                row = get_or_create_row(rows, parent_session_id, model)
-                                row.subagent["tool_errors"] += 1
+    # Order-independent join, within this nested file only (§5).
+    for tid in pending_error_tids:
+        model = tool_use_map.get(tid)
+        if model:
+            row = get_or_create_row(rows, parent_session_id, model)
+            row.subagent["tool_errors"] += 1
 
 
 # ---------------------------------------------------------------------------
@@ -630,13 +738,20 @@ def compute_duration_ms(main_events_ts_sorted):
 def build_row_dict(row):
     main_events_sorted = sorted(row.main_events)
     duration_ms = compute_duration_ms(main_events_sorted)
+    # §6 main-wins rule: main-line timestamps when the row has main lines
+    # with parseable timestamps, otherwise this model's subagent-line
+    # timestamps. Null only if no line of the row had a parseable timestamp.
+    if row.main_start_ms is not None:
+        start_ms, end_ms = row.main_start_ms, row.main_end_ms
+    else:
+        start_ms, end_ms = row.sub_start_ms, row.sub_end_ms
     return {
         "session_id": row.session_id,
         "model": row.model,
         "project": row.project or "unknown",
         "task_category": row.task_category or DEFAULT_TASK_CATEGORY,
-        "start_ts": ms_to_iso(row.start_ms),
-        "end_ts": ms_to_iso(row.end_ms),
+        "start_ts": ms_to_iso(start_ms),
+        "end_ts": ms_to_iso(end_ms),
         "duration_active_ms": duration_ms,
         "main": row.main,
         "subagent": row.subagent,
@@ -649,27 +764,57 @@ def build_row_dict(row):
 
 def collect(root):
     """Walk root, process all top-level and nested files, return
-    (rows dict keyed by (session_id, model) -> RowState, Counters)."""
+    (rows dict keyed by (session_id, model) -> RowState, Counters).
+
+    Three phases:
+      1. ALL top-level files (collecting the set of known session ids and
+         session-level metadata).
+      2. Nested subagent files. A nested tree whose parent session id has
+         no top-level file is ORPHANED (§0 amended): skipped entirely,
+         counted in files_nested_orphaned — a nested file never creates a
+         session row.
+      3. Session-level field reconciliation: stamp every row of a session
+         with the session's project / task_category, so subagent-only rows
+         created in phase 2 inherit them (§5/§5b session-level rule).
+    """
     rows = {}
     counters = Counters()
+    session_meta = {}
+    known_sessions = set()
 
-    for project_dir in iter_project_dirs(root):
-        # Top-level files first so project/task_category are set on the row
-        # before any nested file for the same session creates a
-        # subagent-only row for a different model.
+    project_dirs = list(iter_project_dirs(root))
+
+    # Phase 1: all top-level files.
+    for project_dir in project_dirs:
         for path in iter_top_level_files(project_dir):
             counters.top_level_files_seen += 1
-            produced = process_top_level_file(path, rows, counters)
+            base = os.path.basename(path)
+            if base.endswith(".jsonl"):
+                base = base[: -len(".jsonl")]
+            known_sessions.add(base)
+            produced = process_top_level_file(path, rows, counters, session_meta)
             if produced:
                 counters.files_with_data += 1
 
+    # Phase 2: nested subagent files.
+    for project_dir in project_dirs:
         for path, parent_session_id, is_journal in iter_nested_agent_files(project_dir):
             if is_journal:
                 continue
             if not os.path.basename(path).startswith("agent-"):
                 continue
+            if parent_session_id not in known_sessions:
+                counters.files_nested_orphaned += 1
+                continue
             counters.files_nested_scanned += 1
             process_nested_file(path, parent_session_id, rows, counters)
+
+    # Phase 3: session-level field reconciliation.
+    for (sid, _model), row in rows.items():
+        meta = session_meta.get(sid)
+        if meta:
+            row.project = meta["project"]
+            row.task_category = meta["task_category"]
 
     return rows, counters
 
@@ -683,6 +828,7 @@ def build_data(rows, counters):
         "top_level_files_seen": counters.top_level_files_seen,
         "files_with_data": counters.files_with_data,
         "files_nested_scanned": counters.files_nested_scanned,
+        "files_nested_orphaned": counters.files_nested_orphaned,
         "lines_skipped": counters.lines_skipped,
         "turn_attribution": {
             "chain": counters.chain,
@@ -694,19 +840,23 @@ def build_data(rows, counters):
     }
 
 
-def print_summary(data, elapsed_s):
+def print_summary(data, elapsed_s, tool_id_collisions=0):
     print(f"model-compare collect.py — run summary ({elapsed_s:.1f}s)")
     print(f"  top-level files seen:    {data['top_level_files_seen']}")
     print(f"  top-level files w/ data: {data['files_with_data']}")
     print(f"  nested files scanned:    {data['files_nested_scanned']}")
+    print(f"  nested files orphaned:   {data['files_nested_orphaned']}")
     print(f"  lines skipped:           {data['lines_skipped']}")
+    print(f"  duplicate tool_use.id collisions: {tool_id_collisions}")
     ta = data["turn_attribution"]
     total_ta = ta["chain"] + ta["fallback"] + ta["dropped"]
     fallback_pct = (ta["fallback"] / total_ta * 100) if total_ta else 0.0
     print(f"  turn attribution: chain={ta['chain']} fallback={ta['fallback']} "
           f"dropped={ta['dropped']} (fallback={fallback_pct:.2f}%)")
-    if fallback_pct > 5.0:
-        print("  WARNING: fallback ratio exceeds 5% — escalate to Lead before trusting attribution.")
+    if fallback_pct > FALLBACK_WARN_PCT:
+        print(f"  WARNING: fallback ratio exceeds {FALLBACK_WARN_PCT:.0f}% — materially above "
+              "the ~20% baseline accepted in METRIC-RULES.md §4 (queued user "
+              "messages); escalate to Lead before trusting attribution.")
     print(f"  models seen: {', '.join(data['models_seen'])}")
 
     per_model_sessions = {}
@@ -736,7 +886,7 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-    print_summary(data, elapsed)
+    print_summary(data, elapsed, tool_id_collisions=counters.tool_id_collisions)
     print(f"  wrote {out_path}")
 
 

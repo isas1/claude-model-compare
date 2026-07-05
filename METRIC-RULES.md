@@ -52,7 +52,22 @@ counters to its parent session.
 
 Skip (increment `lines_skipped`) any line that: fails `json.loads`; is not a dict; has
 `type` not in {`user`,`assistant`}; is an assistant line whose `message.model` is `<synthetic>`,
-`null`, or empty. Parsing is per-line try/except — a bad line never aborts a file. Verified:
+`null`, empty, or NOT A STRING. ALL per-line processing is wrapped in try/except — ANY
+exception while processing a line (malformed usage values, unhashable tool_use fields,
+wrong-typed anything) skips that line and increments `lines_skipped`; a bad line never
+aborts a file. Numeric usage fields: coerce via int() inside the guard; non-coercible →
+treat that field as 0 (do not lose the line's other data if only one field is bad — but a
+raised exception anywhere still falls back to skip-line).
+
+**Orphaned nested files** (a `<sessionId>/subagents/` tree with NO matching top-level
+`<sessionId>.jsonl`): skipped entirely — a nested file never creates a session row. Count
+them in a `files_nested_orphaned` counter in data.json.
+
+**Duplicate ids:** duplicate `uuid` values within a file (observed: 683 in one real file)
+— when resolving `parentUuid` references, prefer the nearest matching line AT OR AFTER the
+referencing line in file order; deterministic, never dict-last-writer. Duplicate
+`tool_use.id` within a file: first occurrence in file order wins the join; count
+collisions in the run summary (stdout only, not data.json). Verified:
 0 malformed JSON lines across the tree; `<synthetic>` = 0.26% of assistant lines (152/58,373 in
 top-level), empty model = 0% in top-level files.
 

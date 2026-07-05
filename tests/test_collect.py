@@ -48,6 +48,49 @@ class TestUnitFunctions(unittest.TestCase):
         self.assertIsNone(collect.normalize_model(None))
         self.assertIsNone(collect.normalize_model(""))
 
+    def test_normalize_model_non_string_skipped(self):
+        # §0 amended: model NOT A STRING -> skip (never AttributeError).
+        self.assertIsNone(collect.normalize_model(123))
+        self.assertIsNone(collect.normalize_model(["claude-opus-4-8"]))
+        self.assertIsNone(collect.normalize_model({"model": "x"}))
+
+    def test_safe_int_coercion(self):
+        # §0 amended: non-coercible usage values count as 0, keep the line.
+        self.assertEqual(collect.safe_int(5), 5)
+        self.assertEqual(collect.safe_int("7"), 7)
+        self.assertEqual(collect.safe_int("nope"), 0)
+        self.assertEqual(collect.safe_int(None), 0)
+        self.assertEqual(collect.safe_int([1]), 0)
+
+    def test_fallback_warning_threshold_30_percent(self):
+        # Review item 8: warn only above the 30% escalation threshold
+        # (§4 amended baseline is ~20%), never at the accepted baseline.
+        import io
+        from contextlib import redirect_stdout
+
+        def summary_output(chain, fallback):
+            data = {
+                "top_level_files_seen": 1, "files_with_data": 1,
+                "files_nested_scanned": 0, "files_nested_orphaned": 0,
+                "lines_skipped": 0,
+                "turn_attribution": {"chain": chain, "fallback": fallback, "dropped": 0},
+                "models_seen": [], "rows": [],
+            }
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                collect.print_summary(data, 0.0)
+            return buf.getvalue()
+
+        # 20% fallback (the accepted baseline) -> no warning
+        self.assertNotIn("WARNING", summary_output(chain=80, fallback=20))
+        # 25% -> still no warning (below 30%)
+        self.assertNotIn("WARNING", summary_output(chain=75, fallback=25))
+        # 35% -> warning fires, referencing the spec baseline
+        out = summary_output(chain=65, fallback=35)
+        self.assertIn("WARNING", out)
+        self.assertIn("30%", out)
+        self.assertIn("20%", out)
+
     def test_has_real_text_string(self):
         self.assertTrue(collect.has_real_text("hello"))
         self.assertFalse(collect.has_real_text(""))
@@ -296,6 +339,99 @@ class TestFixtureFiles(unittest.TestCase):
         self.assertEqual(sonnet_row["main"]["assistant_messages"], 1)
         self.assertEqual(sonnet_row["subagent"]["messages"], 0)
 
+    def test_subagent_only_row_inherits_session_project_and_category(self):
+        # Review MF-1: project and task_category are SESSION-level (§5/§5b).
+        # The Haiku subagent-only row must inherit them from the parent
+        # session (cwd .../project-a; first prompt "build a feature and
+        # delegate part of it" -> build-feature), NOT default to
+        # "unknown"/"other" just because the row was created from a nested
+        # file after the top-level file was processed.
+        haiku_row = self.rows[("subagent_only_parent", "Haiku 4.5")]
+        sonnet_row = self.rows[("subagent_only_parent", "Sonnet 5")]
+        self.assertEqual(haiku_row["project"], "project-a")
+        self.assertEqual(haiku_row["task_category"], "build-feature")
+        # both rows of the session carry identical session-level fields
+        self.assertEqual(haiku_row["project"], sonnet_row["project"])
+        self.assertEqual(haiku_row["task_category"], sonnet_row["task_category"])
+
+    def test_main_wins_start_end_ts_over_same_model_subagent(self):
+        # Review item 2 (Codex): a row that HAS main lines must take
+        # start_ts/end_ts from MAIN lines only — a same-model subagent line
+        # at 10:00 must not stretch end_ts past the last main line (09:00:05).
+        row = self.rows[("main_wins_ts", "Opus 4.8")]
+        self.assertEqual(row["main"]["assistant_messages"], 1)
+        self.assertEqual(row["subagent"]["messages"], 1)  # subagent counted
+        self.assertEqual(row["start_ts"], "2026-07-03T09:00:00Z")
+        self.assertEqual(row["end_ts"], "2026-07-03T09:00:05Z")  # not 10:00
+
+    def test_orphaned_nested_file_skipped_entirely(self):
+        # Review item 3: orphan_session/subagents/agent-o.jsonl has NO
+        # matching top-level orphan_session.jsonl. It must create no rows
+        # and be counted in files_nested_orphaned.
+        matches = [k for k in self.rows if k[0] == "orphan_session"]
+        self.assertEqual(matches, [], "orphaned nested file must never create a session row")
+        self.assertEqual(self.counters.files_nested_orphaned, 1)
+
+    def test_hostile_lines_no_crash_and_correct_skips(self):
+        # Review item 4 (§0 amended crash hardening), file processed in
+        # isolation for exact counter assertions:
+        #  - assistant with non-string model (123)     -> line skipped
+        #  - assistant with usage output_tokens="nope" -> kept, field = 0
+        #  - assistant with unhashable tool_use name/id -> line skipped
+        path = os.path.join(FIXTURES_ROOT, "-project-a", "hostile_lines.jsonl")
+        rows = {}
+        counters = collect.Counters()
+        collect.process_top_level_file(path, rows, counters)
+        row = rows[("hostile_lines", "Opus 4.8")]
+        self.assertEqual(row.main["assistant_messages"], 1)  # only the bad-usage line
+        self.assertEqual(row.main["input_tokens"], 5)        # good field kept
+        self.assertEqual(row.main["output_tokens"], 0)       # "nope" -> 0
+        self.assertEqual(row.main["tool_calls"], {})         # bad line contributed nothing
+        self.assertEqual(counters.lines_skipped, 2)
+
+    def test_tool_error_result_before_use_main(self):
+        # Review item 5: tool_result (is_error) BEFORE its tool_use in file
+        # order must still join (order-independent within the file).
+        row = self.rows[("error_before_use", "Opus 4.8")]
+        self.assertEqual(row["main"]["tool_errors"], 1)
+        self.assertEqual(row["main"]["tool_calls"], {"Bash": 1})
+
+    def test_tool_error_result_before_use_nested(self):
+        # Same ordering robustness inside a nested subagent file.
+        row = self.rows[("error_before_use", "Fable 5")]
+        self.assertEqual(row["subagent"]["tool_errors"], 1)
+        self.assertEqual(row["subagent"]["tool_calls"], {"Read": 1})
+
+    def test_duplicate_uuid_positional_attribution(self):
+        # Review item 6 (Opus reviewer repro): two user turns share
+        # uuid="dup"; first is replied to by Opus, second by Fable. With a
+        # last-writer/first-writer dict the split comes out 2/0; the
+        # positional rule (§0 amended: nearest matching line at or after the
+        # referencing line) must give 1/1, both via chain.
+        path = os.path.join(FIXTURES_ROOT, "-project-a", "dup_uuid.jsonl")
+        rows = {}
+        counters = collect.Counters()
+        collect.process_top_level_file(path, rows, counters)
+        opus = rows[("dup_uuid", "Opus 4.8")]
+        fable = rows[("dup_uuid", "Fable 5")]
+        self.assertEqual(opus.main["user_turns"], 1)
+        self.assertEqual(fable.main["user_turns"], 1)
+        self.assertEqual(counters.chain, 2)
+        self.assertEqual(counters.fallback, 0)
+
+    def test_duplicate_tool_use_id_first_wins_and_counted(self):
+        # Review item 7: duplicate tool_use.id -> first occurrence in file
+        # order (Opus) wins the join; the collision is counted.
+        path = os.path.join(FIXTURES_ROOT, "-project-a", "dup_tool_id.jsonl")
+        rows = {}
+        counters = collect.Counters()
+        collect.process_top_level_file(path, rows, counters)
+        opus = rows[("dup_tool_id", "Opus 4.8")]
+        fable = rows[("dup_tool_id", "Fable 5")]
+        self.assertEqual(opus.main["tool_errors"], 1)
+        self.assertEqual(fable.main["tool_errors"], 0)
+        self.assertEqual(counters.tool_id_collisions, 1)
+
     def test_workflow_nested_subagent_path_parent_session_id(self):
         # agent-y.jsonl lives at
         # subagent_parent/subagents/workflows/wf_test/agent-y.jsonl
@@ -383,10 +519,14 @@ class TestBuildDataSchema(unittest.TestCase):
     def test_top_level_schema_keys(self):
         expected_keys = {
             "generated_at", "top_level_files_seen", "files_with_data",
-            "files_nested_scanned", "lines_skipped", "turn_attribution",
-            "models_seen", "rows",
+            "files_nested_scanned", "files_nested_orphaned", "lines_skipped",
+            "turn_attribution", "models_seen", "rows",
         }
         self.assertEqual(set(self.data.keys()), expected_keys)
+
+    def test_files_nested_orphaned_field_present(self):
+        # §0 amended: orphaned nested trees counted in data.json.
+        self.assertEqual(self.data["files_nested_orphaned"], 1)
 
     def test_turn_attribution_shape(self):
         self.assertEqual(set(self.data["turn_attribution"].keys()), {"chain", "fallback", "dropped"})
