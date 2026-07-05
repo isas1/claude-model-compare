@@ -103,6 +103,7 @@ async function loadData() {
     return;
   }
   document.getElementById('mainContent').style.display = '';
+  document.getElementById('siteNav').style.display = '';
   init();
 }
 
@@ -1053,11 +1054,14 @@ function renderMessagePatterns() {
   const container = document.getElementById('messagePatternsCards');
   if (!section || !container) return;
 
+  const navLink = document.getElementById('navMessagePatterns');
   if (!hasV2Data()) {
     section.style.display = 'none';
+    if (navLink) navLink.style.display = 'none';
     return;
   }
   section.style.display = '';
+  if (navLink) navLink.style.display = '';
   container.innerHTML = '';
 
   const models = allModelsSeen().filter(m => visibleModels.has(m));

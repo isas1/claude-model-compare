@@ -56,7 +56,32 @@ h1 { font-size: 1.9rem; letter-spacing: -0.02em; }
 
 main { max-width: 1200px; margin: 0 auto; padding: 0 32px 64px; }
 
-section { margin-top: 44px; }
+/* Sticky section nav — wayfinding for a very tall page */
+#siteNav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 8px 32px;
+  max-width: 1200px;
+  margin: 12px auto 0;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+#siteNav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+#siteNav a:hover { color: var(--text); background: var(--panel2); }
+
+section { margin-top: 44px; scroll-margin-top: 52px; }
 h2 { font-size: 1.2rem; margin-bottom: 4px; }
 .hint { color: var(--muted); font-size: 0.83rem; margin-bottom: 16px; }
 code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 0.85em; }
