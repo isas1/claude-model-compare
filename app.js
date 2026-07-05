@@ -55,6 +55,18 @@ function fmtDuration(ms) {
   return `${s}s`;
 }
 
+// Escape a data.json-derived string before interpolating into innerHTML.
+// Static template strings we author ourselves do not need this.
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function parseTs(ts) {
   if (!ts) return null;
   const t = Date.parse(ts);
@@ -159,7 +171,7 @@ function buildModelChips() {
     const chip = document.createElement('div');
     chip.className = 'chip' + (visibleModels.has(model) ? ' active' : '');
     chip.style.setProperty('--chip-color', colorForModel(model));
-    chip.innerHTML = `<span class="dot"></span>${model}`;
+    chip.innerHTML = `<span class="dot"></span>${escapeHtml(model)}`;
     chip.addEventListener('click', () => {
       if (visibleModels.has(model)) {
         visibleModels.delete(model);
@@ -187,7 +199,7 @@ function renderOverview() {
     card.style.setProperty('--card-color', colorForModel(model));
 
     if (rows.length === 0) {
-      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      card.innerHTML = `<h3>${escapeHtml(model)}</h3><div class="empty">no sessions</div>`;
       container.appendChild(card);
       return;
     }
@@ -197,7 +209,7 @@ function renderOverview() {
     const userTurns = rows.map(r => r.main.user_turns);
 
     card.innerHTML = `
-      <h3>${model}</h3>
+      <h3>${escapeHtml(model)}</h3>
       <div class="metric-row"><span class="k">Sessions</span><span class="v">${rows.length}</span></div>
       <div class="metric-row"><span class="k">Median output tokens</span><span class="v">${fmtNum(median(outputTokens))}</span></div>
       <div class="metric-row"><span class="k">Median active duration</span><span class="v">${fmtDuration(median(durations))}</span></div>
@@ -285,6 +297,13 @@ const TABLE_METRICS = [
   { key: 'shape.cache_reuse', label: 'Cache reuse (context served from cache)', section: 'shape',
     get: r => (r.main.cache_read_tokens + r.main.input_tokens) ? r.main.cache_read_tokens / (r.main.cache_read_tokens + r.main.input_tokens) : NaN,
     fmt: fmtPct },
+  { key: 'shape.subagent_active_rate', label: 'Subagent-active session rate', section: 'shape',
+    // Cohort-level percentage (share of rows with subagent.messages > 0), not a per-row ratio —
+    // computed once per cohort via the pooled path.
+    pooled: rows => {
+      if (!rows.length) return null;
+      return rows.filter(r => r.subagent.messages > 0).length / rows.length;
+    }, fmt: fmtPct, pooledCaption: 'share of sessions' },
 ];
 
 function sumToolCalls(toolCallsMap) {
@@ -311,7 +330,7 @@ function renderTableSection() {
 
   // header
   const head = document.getElementById('compareTableHead');
-  head.innerHTML = '<th>Metric</th>' + models.map(m => `<th>${m}<br><span style="font-weight:400;color:var(--muted)">n=${perModelRows[m].length}</span></th>`).join('');
+  head.innerHTML = '<th>Metric</th>' + models.map(m => `<th>${escapeHtml(m)}<br><span style="font-weight:400;color:var(--muted)">n=${perModelRows[m].length}</span></th>`).join('');
 
   // body
   const body = document.getElementById('compareTableBody');
@@ -346,7 +365,8 @@ function renderTableSection() {
         if (rate === null || Number.isNaN(rate)) {
           cells += `<td class="empty-col">n/a</td>`;
         } else {
-          cells += `<td class="metric-value"><span class="median">${fmtFn(rate)}</span><span class="mean">Σerrors / Σcalls</span></td>`;
+          const caption = metric.pooledCaption || 'Σerrors / Σcalls';
+          cells += `<td class="metric-value"><span class="median">${fmtFn(rate)}</span><span class="mean">${caption}</span></td>`;
         }
         return;
       }
@@ -492,9 +512,9 @@ function renderChart() {
     circle.addEventListener('mouseenter', (e) => {
       tooltip.style.display = 'block';
       tooltip.innerHTML = `
-        <div class="tt-row"><span class="k">Model</span><span>${p.model}</span></div>
-        <div class="tt-row"><span class="k">Session</span><span>${p.session_id.slice(0, 8)}…</span></div>
-        <div class="tt-row"><span class="k">Project</span><span>${p.project}</span></div>
+        <div class="tt-row"><span class="k">Model</span><span>${escapeHtml(p.model)}</span></div>
+        <div class="tt-row"><span class="k">Session</span><span>${escapeHtml(p.session_id.slice(0, 8))}…</span></div>
+        <div class="tt-row"><span class="k">Project</span><span>${escapeHtml(p.project)}</span></div>
         <div class="tt-row"><span class="k">Output tokens</span><span>${fmtNum(p.val)}</span></div>
       `;
     });
@@ -543,7 +563,7 @@ function renderToolUsage() {
     panel.style.setProperty('--panel-color', colorForModel(model));
 
     if (rows.length === 0) {
-      panel.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      panel.innerHTML = `<h3>${escapeHtml(model)}</h3><div class="empty">no sessions</div>`;
       container.appendChild(panel);
       return;
     }
@@ -574,7 +594,7 @@ function renderToolUsage() {
         const isOther = name === 'other';
         barsHtml += `
           <div class="bar-row">
-            <span class="bar-label${isOther ? ' is-other' : ''}">${name}</span>
+            <span class="bar-label${isOther ? ' is-other' : ''}">${escapeHtml(name)}</span>
             <div class="bar-track"><div class="bar-fill" style="width:${pct}%;--bar-color:${getComputedColor(model)}"></div></div>
             <span class="bar-num">${count}</span>
           </div>
@@ -582,7 +602,7 @@ function renderToolUsage() {
       });
     }
 
-    panel.innerHTML = `<h3>${model}</h3><div class="bars">${barsHtml}</div>`;
+    panel.innerHTML = `<h3>${escapeHtml(model)}</h3><div class="bars">${barsHtml}</div>`;
     container.appendChild(panel);
   });
 }
@@ -709,8 +729,12 @@ function computeCategoryMatrix(models, allRows, normalization) {
     }
   });
   if (normalization === 'col') {
+    const modelSet = new Set(models);
     categories.forEach(cat => {
-      const rowsInCat = allRows.filter(r => r.task_category === cat);
+      // Denominator is the sum over VISIBLE models only, so the rendered columns
+      // (which only show `models`) sum to 100% — rows from hidden models must not
+      // silently inflate the denominator.
+      const rowsInCat = allRows.filter(r => r.task_category === cat && modelSet.has(r.model));
       const total = rowsInCat.length;
       models.forEach(model => {
         const c = rowsInCat.filter(r => r.model === model).length;
@@ -761,24 +785,26 @@ function renderShapeCards() {
     card.style.setProperty('--card-color', colorForModel(model));
 
     if (rows.length === 0) {
-      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      card.innerHTML = `<h3>${escapeHtml(model)}</h3><div class="empty">no sessions</div>`;
       container.appendChild(card);
       return;
     }
 
     const shape = computeShapeRatios(rows);
     const verbosity = computeVerbosity(rows);
+    const delegation = computeDelegation(rows);
 
     const excludedNote = shape.excludedTurns > 0
       ? `<div class="metric-row"><span class="k">Rows excluded (0 user turns)</span><span class="v">${shape.excludedTurns}</span></div>`
       : '';
 
     card.innerHTML = `
-      <h3>${model}</h3>
+      <h3>${escapeHtml(model)}</h3>
       <div class="metric-row"><span class="k">Assistant msgs / user turn (median)</span><span class="v">${fmtNum(shape.msgsPerTurnMedian)}</span></div>
       <div class="metric-row"><span class="k">Tool calls / user turn (median)</span><span class="v">${fmtNum(shape.toolsPerTurnMedian)}</span></div>
       <div class="metric-row"><span class="k">One-shot rate</span><span class="v">${fmtPct(shape.oneShotRate)}</span></div>
       <div class="metric-row"><span class="k">Output tokens / assistant msg (median)</span><span class="v">${fmtNum(verbosity.median)}</span></div>
+      <div class="metric-row"><span class="k">Subagent-active session rate</span><span class="v">${fmtPct(delegation.subagentActiveRate)}</span></div>
       ${excludedNote}
     `;
     container.appendChild(card);
@@ -811,7 +837,9 @@ function renderToolMix() {
     };
 
     if (!mix) {
-      track.innerHTML = `<span class="empty">—</span>`;
+      // Zero total tool calls for this model: show all 5 classes as undefined ("—"),
+      // not a single collapsed dash — the cohort has a defined class set, just no data.
+      track.innerHTML = TOOL_CLASSES.map(cls => `<span class="empty">${TOOL_CLASS_LABEL[cls]}: —</span>`).join(' ');
     } else {
       TOOL_CLASSES.forEach(cls => {
         const pct = mix.pct[cls];
@@ -834,6 +862,13 @@ function renderToolMix() {
         `<span><span class="sw" style="background:var(${TOOL_CLASS_COLOR_VAR[cls]})"></span>${TOOL_CLASS_LABEL[cls]} ${mix.pct[cls].toFixed(1)}%</span>`
       ).join('');
       row.appendChild(legend);
+    } else {
+      const legend = document.createElement('div');
+      legend.className = 'tool-mix-legend';
+      legend.innerHTML = TOOL_CLASSES.map(cls =>
+        `<span><span class="sw" style="background:var(${TOOL_CLASS_COLOR_VAR[cls]})"></span>${TOOL_CLASS_LABEL[cls]} —</span>`
+      ).join('');
+      row.appendChild(legend);
     }
 
     container.appendChild(row);
@@ -853,12 +888,12 @@ function renderHeatmap() {
   const head = document.getElementById('heatmapTableHead');
   const body = document.getElementById('heatmapTableBody');
 
-  head.innerHTML = '<th>Model</th>' + categories.map(c => `<th>${c}</th>`).join('');
+  head.innerHTML = '<th>Model</th>' + categories.map(c => `<th>${escapeHtml(c)}</th>`).join('');
   body.innerHTML = '';
 
   models.forEach(model => {
     const tr = document.createElement('tr');
-    let cells = `<td class="metric-name">${model}</td>`;
+    let cells = `<td class="metric-name">${escapeHtml(model)}</td>`;
     categories.forEach(cat => {
       const pct = matrix[model][cat];
       if (pct === null || pct === undefined) {
@@ -889,7 +924,7 @@ function renderSuggestedUse() {
     card.style.setProperty('--card-color', colorForModel(model));
 
     if (rows.length === 0) {
-      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      card.innerHTML = `<h3>${escapeHtml(model)}</h3><div class="empty">no sessions</div>`;
       container.appendChild(card);
       return;
     }
@@ -909,17 +944,20 @@ function renderSuggestedUse() {
 
     let catSentence;
     if (shares.length === 0) {
-      catSentence = `In your usage, sessions on ${model} did not have a clear category breakdown.`;
+      catSentence = `In your usage, sessions on ${escapeHtml(model)} did not have a clear category breakdown.`;
     } else if (shares.length === 1) {
-      catSentence = `In your usage, sessions on ${model} most often looked like ${shares[0].cat} (${shares[0].pct.toFixed(0)}%).`;
+      catSentence = `In your usage, sessions on ${escapeHtml(model)} most often looked like ${escapeHtml(shares[0].cat)} (${shares[0].pct.toFixed(0)}%).`;
     } else {
-      catSentence = `In your usage, sessions on ${model} most often looked like ${shares[0].cat} (${shares[0].pct.toFixed(0)}%) and ${shares[1].cat} (${shares[1].pct.toFixed(0)}%).`;
+      catSentence = `In your usage, sessions on ${escapeHtml(model)} most often looked like ${escapeHtml(shares[0].cat)} (${shares[0].pct.toFixed(0)}%) and ${escapeHtml(shares[1].cat)} (${shares[1].pct.toFixed(0)}%).`;
     }
 
-    const autonomyText = autonomy || 'a short exchange';
+    // Undefined ratio (e.g. all rows in this cohort have user_turns == 0) must render
+    // as the dash convention used elsewhere on this page — never silently fall back to
+    // the "a short exchange" bin, which would misrepresent an undefined value as data.
+    const autonomyText = autonomy || '—';
 
     card.innerHTML = `
-      <h3>${model}</h3>
+      <h3>${escapeHtml(model)}</h3>
       <p class="suggested-text">
         ${catSentence}
         These sessions leaned ${toolPhrase} and averaged ${autonomyText} per prompt.
@@ -1025,7 +1063,7 @@ function renderMessagePatterns() {
     card.style.setProperty('--card-color', colorForModel(model));
 
     if (rows.length === 0) {
-      card.innerHTML = `<h3>${model}</h3><div class="empty">no sessions</div>`;
+      card.innerHTML = `<h3>${escapeHtml(model)}</h3><div class="empty">no sessions</div>`;
       container.appendChild(card);
       return;
     }
@@ -1038,12 +1076,12 @@ function renderMessagePatterns() {
     let stopReasonHtml = '<span class="empty">—</span>';
     if (stopMix) {
       stopReasonHtml = stopMix.entries
-        .map(e => `<div class="bar-row"><span class="bar-label">${e.key}</span><div class="bar-track"><div class="bar-fill" style="width:${e.pct}%;--bar-color:${getComputedColor(model)}"></div></div><span class="bar-num">${e.pct.toFixed(1)}%</span></div>`)
+        .map(e => `<div class="bar-row"><span class="bar-label">${escapeHtml(e.key)}</span><div class="bar-track"><div class="bar-fill" style="width:${e.pct}%;--bar-color:${getComputedColor(model)}"></div></div><span class="bar-num">${e.pct.toFixed(1)}%</span></div>`)
         .join('');
     }
 
     card.innerHTML = `
-      <h3>${model}</h3>
+      <h3>${escapeHtml(model)}</h3>
       <div class="metric-row"><span class="k">Thinking block frequency (median)</span><span class="v">${fmtPct(thinking.median)}</span></div>
       <div class="metric-row"><span class="k">Text chars / text block (median)</span><span class="v">${fmtNum(textChars.median)}</span></div>
       <div class="metric-row"><span class="k">Quick follow-up rate (median, cadence not sentiment)</span><span class="v">${fmtPct(followUp.quickRateMedian)}</span></div>
