@@ -907,7 +907,11 @@ function renderHeatmap() {
         cells += `<td class="empty-col">—</td>`;
       } else {
         const alpha = Math.min(0.85, pct / 100 + 0.06);
-        cells += `<td><div class="heatmap-cell" style="background: rgba(217, 122, 52, ${alpha})">${pct.toFixed(1)}%</div></td>`;
+        // Accent comes from the CSS token, not a pinned literal; above ~45% fill the
+        // orange is mid-luminance, where light text fails contrast — switch to dark text.
+        const darkText = alpha > 0.45 ? ' is-hot' : '';
+        const mixPct = Math.round(alpha * 100);
+        cells += `<td><div class="heatmap-cell${darkText}" style="background: color-mix(in srgb, var(--accent) ${mixPct}%, transparent)">${pct.toFixed(1)}%</div></td>`;
       }
     });
     tr.innerHTML = cells;

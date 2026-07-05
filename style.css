@@ -272,6 +272,7 @@ svg.chart { display: block; }
 #heatmapTable td, #heatmapTable th { text-align: center; }
 #heatmapTable td.metric-name, #heatmapTable th:first-child { text-align: left; }
 .heatmap-cell { border-radius: 4px; padding: 4px 6px; }
+.heatmap-cell.is-hot { color: var(--bg); font-weight: 600; }
 
 .error-banner {
   max-width: 900px;
