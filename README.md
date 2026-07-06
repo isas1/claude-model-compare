@@ -1,5 +1,7 @@
 # Model Compare
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/isas1)
+
 A local, zero-dependency dashboard that shows **how you use different Claude models** in [Claude Code](https://claude.com/claude-code) — mined entirely from the transcript files already sitting on your machine.
 
 Ever wondered whether you reach for Opus for different work than Sonnet? Whether one model's sessions run longer, use more tools, delegate more to subagents, or one-shot more of your requests? This answers that — for *your* sessions, on *your* machine, with nothing uploaded anywhere.
@@ -74,6 +76,10 @@ python3 -m pytest tests/ -q
 
 - `PLAN.md`, `SCHEMA-NOTES.md`, `REVIEW-PHASE*.md` — working documents from development (schema research, adversarial review rounds). Kept for transparency; session IDs in examples are redacted placeholders.
 - Transcript format is undocumented and may drift between Claude Code versions. The collector fails soft (skips malformed lines, reports fallback rates in the footer), but if a new version changes the schema, open an issue.
+
+## Support
+
+If this saved you an evening of curiosity-scripting, you can [buy me a coffee](https://buymeacoffee.com/isas1). ☕
 
 ## License
 
