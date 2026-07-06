@@ -30,7 +30,7 @@ Track B:  task suite  -> run per model (headless)      -> blind judge -> results
   `parentUuid`.
 - Inventory: Opus 4.8 = 442 sessions, Sonnet 4.6 = 67, Fable 5 = 46, Sonnet 5 = 26.
   (Session counting caveat: see Phase 0 item 8.)
-- **Reuse:** `Creative/agent-insights/analyze.mjs` already walks
+- **Reuse:** an earlier internal transcript-mining script already walks
   `~/.claude/projects/**/*.jsonl`, streams line-by-line, handles the directory layout.
   Start the Track A collector from that skeleton — do not write a walker from scratch.
 - claude.ai web chats are OUT OF SCOPE — no local files, no API.

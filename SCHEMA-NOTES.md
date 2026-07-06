@@ -41,11 +41,11 @@
 **ANSWER:** Found exactly 3 sessionIds with model switches, all `<synthetic>` → `claude-opus-4-8`. ParentUuid chain IS usable: each message's `uuid` becomes the `parentUuid` of the next. To attribute user line to following assistant: user's UUID links via `parentUuid`; find next assistant line where `parentUuid` equals that user's UUID. That assistant line has the model.
 
 **EVIDENCE:** 
-- sessionId `952cec8f-4ce8-40b7-bfb5-1e5cfdb04d84`: 690 assistant lines, 2 models (`<synthetic>`, `claude-opus-4-8`)
-- sessionId `12faffa2-bce6-47e8-8b76-972a4cb448a4`: 2 models, `<synthetic>` appears first
-- sessionId `2bff30c0-3548-4ad5-9f50-2b246b774f5f`: 2 models, same pattern
+- sessionId `aaaaaaa1-0000-4000-8000-000000000000`: 690 assistant lines, 2 models (`<synthetic>`, `claude-opus-4-8`)
+- sessionId `aaaaaaa2-0000-4000-8000-000000000000`: 2 models, `<synthetic>` appears first
+- sessionId `aaaaaaa3-0000-4000-8000-000000000000`: 2 models, same pattern
 
-Chain example from file 952cec8f-4ce8-40b7-bfb5-1e5cfdb04d84.jsonl (line by line):
+Chain example from file aaaaaaa1-0000-4000-8000-000000000000.jsonl (line by line):
 - line 12: assistant uuid=a98cfef7, parent=1a5bb740, model=claude-opus-4-8
 - line 13: assistant uuid=1f3eb72f, parent=a98cfef7, model=claude-opus-4-8
 - line 14: assistant uuid=fb968530, parent=1f3eb72f, model=claude-opus-4-8
@@ -60,7 +60,7 @@ Each UUID in column 2 points backward to column 1 of previous message. To find "
 
 **ANSWER:** Tool flow confirmed: assistant lines have `message.content[]` with `{type:'tool_use', id:'toolu_01...'}`. User lines have `message.content[]` with `{type:'tool_result', tool_use_id:'toolu_01...', is_error:false/null}`. Join on tool_use.id ↔ tool_result.tool_use_id works. When no error: `is_error` is **absent** or **null** (both observed); when error present: `is_error:false` or `is_error:true`.
 
-**EVIDENCE:** File f118092f-f337-4bde-b095-6c76ad5a8329.jsonl (237 lines): 90 tool_use blocks, 90 matching tool_result blocks. Sample tool_result keys: `['content', 'tool_use_id', 'type']` (no `is_error` field when success). When inspected, `is_error=None` (Python null) in 4/5 examples, `is_error=False` in 1/5. No `is_error=true` in sample, but field value can be true/false/absent.
+**EVIDENCE:** File aaaaaaa4-0000-4000-8000-000000000000.jsonl (237 lines): 90 tool_use blocks, 90 matching tool_result blocks. Sample tool_result keys: `['content', 'tool_use_id', 'type']` (no `is_error` field when success). When inspected, `is_error=None` (Python null) in 4/5 examples, `is_error=False` in 1/5. No `is_error=true` in sample, but field value can be true/false/absent.
 
 **CONFIDENCE:** High. 179 tool blocks verified.
 
@@ -93,8 +93,8 @@ Each UUID in column 2 points backward to column 1 of previous message. To find "
 **EVIDENCE:**
 - Sample of 50 files: 7 match, 42 mismatch (14% match rate)
 - Duplicate sessionIds: 76 unique sessionIds appearing in 2+ files
-  - Example: sessionId `046cb1ac-d330-495f-9cc5-20661c49e41e` appears in 10 files with agent-names like agent-ad43192f1c3051d3a.jsonl, agent-a254f80390ebda106.jsonl, etc.
-  - Example: sessionId `952cec8f-4ce8-40b7-bfb5-1e5cfdb04d84` appears in 4 files (one named after the sessionId, three named agent-*.jsonl)
+  - Example: sessionId `aaaaaaa5-0000-4000-8000-000000000000` appears in 10 files with agent-names like agent-aaaaaaaaaaaaaaaa1.jsonl, agent-aaaaaaaaaaaaaaaa2.jsonl, etc.
+  - Example: sessionId `aaaaaaa1-0000-4000-8000-000000000000` appears in 4 files (one named after the sessionId, three named agent-*.jsonl)
 - Pattern: agent-*.jsonl files are sub-runs or workflow steps within a main session (identifiable by sessionId).
 
 **CONFIDENCE:** High. Verified across 50 sampled files and full sessionId deduplication.

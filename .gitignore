@@ -1,3 +1,5 @@
 data.json
 bench/runs/
 __pycache__/
+.gstack/
+.pytest_cache/
